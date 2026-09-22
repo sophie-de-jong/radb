@@ -1,0 +1,411 @@
+# Grammar, precedence, and associativity
+
+This file is the single source of truth for the design decisions the spec
+asks you to "decide and document." `src/lib.rs`' module documentation and
+`tests/*.rs` are written against the rules below; if you change a decision,
+update both. The one decision the spec names for row #8 (keywords as
+attribute names) lives in §Keywords as attribute names.
+
+The document has the five parts the project brief asks for:
+
+1. The grammar itself — §1
+2. Precedence and associativity — §2
+3. An ambiguity demonstration — §3
+4. A parsing strategy justification — §4
+5. Sources — §5
+
+---
+
+## 1  The grammar (EBNF)
+
+### 1.1  Lexical rules
+
+A scanner walks the character stream one character at a time, following
+**maximal munch**: at every non-separator character it consumes the longest
+token that can start there. On seeing `>` it looks one character ahead
+before choosing `>` or `>=` (rows #3). A `-` immediately followed by a digit
+starts a (negative) integer literal; a `-` anywhere else is a lexical error,
+because this language has no binary `-` symbol — set difference is the
+keyword `minus` (row #4).
+
+```
+letter ::= "A".."Z" | "a".."z"
+digit  ::= "0".."9"
+
+WORD     ::= letter ( letter | digit )*
+IDENT    ::= WORD ( "." WORD )?              (* qualified name = ONE token *)
+INT      ::= "-"? digit+                     (* "-30" is one IntLit token  *)
+STRING   ::= "'" ( any_char | "''" )* "'"    (* "''" inside is one literal
+                                                quote; the token carries the
+                                                unescaped value             *)
+COMMENT  ::= "//" any_char_except_newline    (* produced by the scanner,   *)
+                                             (* then discarded             *)
+WS       ::= ( " " | tab | newline | cr )+   (* separator, never a token   *)
+
+KEYWORD  ::= "select" | "project" | "rename" | "join" | "union"
+           | "intersect" | "minus" | "times" | "and" | "or" | "not"
+
+/* Single-character and multi-character operators, "=" and punctuation.    */
+CMPOP    ::= "=" | "!=" | "<" | "<=" | ">" | ">="
+PUNC     ::= "(" | ")" | "[" | "]" | "{" | "}" | ","
+```
+
+Rules carried by the scanner, not the parser:
+
+* A string literal is atomic: `)`, `,` and spaces inside it are ordinary
+  characters, never tokens (rows #5, #6). A doubled quote `''` is an escaped
+  quote and contributes one `'` to the value, and does not close the string
+  (row #7). Reaching end-of-input inside an open string is
+  `LexError::UnterminatedString` pointing at the opening quote (row #9).
+  Bare (unquoted) strings are allowed only in relation-definition tuples,
+  where they lex as `IDENT`/`KEYWORD`.
+* Keywords are produced as keyword tokens everywhere, unconditionally
+  (see §Keywords as attribute names). A qualified name such as `Emp.DID`
+  lexes as a single `IDENT` whose text contains the dot (see §Qualified names).
+
+### 1.2  The concrete grammar
+
+```
+(* ─────────────────────────── program ─────────────────────────── *)
+
+Start        ::= ( RelationDef )* ( Query )?
+
+(* ─────────────────────── relation definitions ────────────────── *)
+
+RelationDef  ::= NAME "(" AttrList ")" "=" "{" TupleList "}"
+NAME         ::= IDENT                    (* relation name; unqualified  *)
+
+AttrList     ::= AttrName ( "," AttrName )+
+TupleList    ::= Tuple ( Tuple )*         (* whitespace is insignificant:  *)
+                                          (*  a tuple ends when its last   *)
+                                          (*  value is not followed by a   *)
+                                          (*  comma, so tuples need not    *)
+                                          (*  each start on a new line;    *)
+                                          (*  blank lines and // comments  *)
+                                          (*  are ignored                  *)
+Tuple        ::= Value ( "," Value )*     (* must hold arity() values: the *)
+                                          (*  caller pushes each tuple into*)
+                                          (*  the Relation after parsing   *)
+                                          (*  it (Relation::push), so      *)
+                                          (*  arity and per-column type    *)
+                                          (*  mixing are enforced while the*)
+                                          (*  relation is being loaded; a  *)
+                                          (*  column has no declared type, *)
+                                          (*  so its type is the one its   *)
+                                          (*  values share — int or str —  *)
+                                          (*  and mixing is a load-time    *)
+                                          (*  error                        *)
+Value        ::= INT                      (* numeric value                *)
+               | STRING                   (* quoted string value          *)
+               | IDENT | KEYWORD          (* bare string value, e.g. John *)
+
+(* ───────────────────────────── queries ────────────────────────── *)
+
+Query        ::= Expr
+Expr         ::= SetExpr
+
+SetExpr      ::= JoinExpr ( "union"     JoinExpr )*
+               | JoinExpr ( "intersect" JoinExpr )*
+               | JoinExpr ( "minus"     JoinExpr )*
+
+JoinExpr     ::= Unary ( ( "times" Unary )
+               | ( "join" "[" Cond "]" Unary ) )*
+
+Unary        ::= "select"  "[" Cond     "]" "(" Expr ")"
+               | "project" "[" ProjList "]" "(" Expr ")"
+               | "rename"  "[" NewName  "]" "(" Expr ")"
+               | Atom
+
+ProjList     ::= AttrName ( "," AttrName )+   (* project[] is a parse error *)
+NewName      ::= AttrName                     (* new relation name          *)
+Atom         ::= NAME | "(" Expr ")"
+
+(* ─────────────────────────── conditions ───────────────────────── *)
+
+Cond         ::= OrExpr
+OrExpr       ::= AndExpr ( "or" AndExpr )*
+AndExpr      ::= NotExpr ( "and" NotExpr )*
+NotExpr      ::= "not" NotExpr
+               | PrimaryCond
+PrimaryCond  ::= "(" Cond ")"
+               | Comparison
+Comparison   ::= Operand CmpOp Operand
+Operand      ::= INT | STRING | AttrName
+AttrName     ::= IDENT | KEYWORD    (* §Keywords as attribute names      *)
+```
+
+The language generated by this grammar is: the set of programs consisting
+of zero or more relation definitions followed by zero or one query, where a
+relation definition has a non-empty attribute list and a non-empty brace
+block of comma-separated value lists (whitespace is insignificant: a tuple
+ends where its last value is not followed by a comma), and a query is a mix
+of
+the six core operators (select, project, rename, union, intersect, minus,
+times, join) and conditions formed from `not`, `and`, `or` and comparisons
+of a number, a string, or a (possibly relation-qualified) attribute name.
+
+A dotted `IDENT` in `Atom` position is accepted syntactically but rejected at
+execution as an unknown relation — a dotted name only makes sense where an
+attribute is expected.
+
+---
+
+## 2  Precedence and associativity
+
+### 2.1  Query operators
+
+| Precedence | Operators                          | Associativity | Enforced by      |
+|------------|------------------------------------|---------------|------------------|
+| 1 (loosest)| `union`, `intersect`, `minus`     | left          | `SetExpr`        |
+| 2          | `times`, `join[c]`                | left          | `JoinExpr`       |
+| 3          | `select[c]`, `project[..]`, `rename[..]` | prefix, applies to its own parenthesised argument | `Unary` |
+| 4 (tightest)| relation name, `( expr )`        | —             | `Atom`           |
+
+Decisions:
+
+* `A union B minus C` == `(A union B) minus C`  (row #10). The three set
+  operators share **one** precedence level and are **left-associative**.
+* `A minus B minus C` == `(A minus B) minus C` (row #11). `minus` is not
+  associative as a set operation, so this matters: with
+  `A = {1,2,3}`, `B = {2,3}`, `C = {3}`,
+  `(A minus B) minus C = {1}` but `A minus (B minus C) = {1,3}`. The
+  executable version of this example is `tests/2_grammar.rs::test_11b_*`.
+* `times` and `join[c]` are tighter than the set operators:
+  `A union B times C` == `A union (B times C)`, and `R times S times T`
+  == `(R times S) times T`. `A join[c] B join[d] C`
+  == `((A join[c] B) join[d] C)`.
+* The unary operators bind tightest of all but are applied to a *full
+  expression* in parentheses, so `select[c](A union B)` is legal.
+
+### 2.2  Condition operators
+
+| Precedence | Operators            | Associativity | Enforced by |
+|------------|----------------------|---------------|-------------|
+| 1 (loosest)| `or`                | left          | `OrExpr`    |
+| 2          | `and`               | left          | `AndExpr`   |
+| 3          | `not`               | prefix        | `NotExpr`   |
+| 4 (tightest)| comparison, `( cond )` | comparison is exact: two operands and one operator | `PrimaryCond` |
+
+Decisions:
+
+* `not` binds tighter than `and`, which binds tighter than `or`
+  (rows #12, #13), so
+  `select[not (a=1 and b=2) or c>3](R)` parses as
+  `select[(not (a=1 and b=2)) or (c>3)](R)` and
+  `select[a=1 and b=2 or c=3](R)` as `select[(a=1 and b=2) or c=3](R)`.
+* `and`/`or` are left-associative; `not` is prefix
+  (`not not a=1` == `not (not (a=1))`).
+* A comparison is non-associative: the grammar demands exactly `Operand
+  CmpOp Operand`, so `a<b<c` is a syntax error, not `(a<b)<c`.
+
+Every decision above is enforced *inside the grammar rules*, never inside
+special cases in the parser code: the precedence levels map one-to-one onto
+nonterminals (`OrExpr` → `AndExpr` → `NotExpr` → `PrimaryCond`; `SetExpr` →
+`JoinExpr` → `Unary` → `Atom`), and left associativity is encoded by the
+right-recursive `( op Operand )*` loops, which fold each new operand into
+the already-parsed left expression.
+
+---
+
+## 3  An ambiguity demonstration
+
+Take the deliberately naive grammar
+
+```
+Expr ::= Expr "union" Expr
+       | Expr "minus" Expr
+       | "(" Expr ")"
+       | IDENT
+```
+
+It is ambiguous: the input `A union B minus C` has two parse trees.
+
+Tree 1 — `(A union B) minus C`:
+
+```
+              minus
+             /     \
+         union       C
+        /     \
+       A       B
+```
+
+Tree 2 — `A union (B minus C)`:
+
+```
+          union
+        /       \
+       A       minus
+              /     \
+             B       C
+```
+
+The two trees genuinely mean different things. With three single-column
+relations  `A = {1, 2}`, `B = {2, 3}`, `C = {2, 4}`:
+
+```
+Tree 1:  (A ∪ B) − C  =  {1,2,3} − {2,4}  =  {1, 3}
+Tree 2:   A ∪ (B − C) =  {1,2}   ∪ {3}    =  {1, 2, 3}
+```
+
+Different inputs, different answers — so the ambiguity must be removed by
+stratifying the grammar into precedence levels and pinning associativity.
+The stratified grammar replacement (§1.2) is:
+
+```
+Expr     ::= SetExpr
+SetExpr  ::= JoinExpr ( SetOp JoinExpr )*
+SetOp    ::= "union" | "intersect" | "minus"   (* one precedence level,
+                                                  left-associative *)
+```
+
+`SetExpr` is a left fold: after parsing `A union B`, the parser sees `minus`
+next and makes the *accumulator* `(A union B)` the left operand of the next
+operator, which forces **Tree 1**, `(A union B) minus C`, and makes
+`A minus B minus C` left-associative. Because `union` and `minus` share one
+precedence level (rather than `union` being looser than `minus`), the tree
+is fixed by associativity alone.
+
+---
+
+## 4  Parsing strategy
+
+The parser is a hand-written **recursive-descent** parser, one function per
+nonterminal in §1.2, with a single-token lookahead. There is no backtracking:
+every nonterminal begins with a distinct first token, so the parser commits
+to the production that token starts and never rewinds.
+
+Why this strategy:
+
+* The project brief forbids parser generators (ANTLR, Lark, yacc, ...), so a
+  hand-built parser is required anyway; recursive descent is the simplest
+  strategy that maps a stratified grammar straight onto function calls and
+  onto the AST (`tests/2_grammar.rs` checks the parsed trees directly).
+* It gives the best error messages with positions: the parser knows exactly
+  which nonterminal expected which token when it hits an unexpected token or
+  end-of-input (rows #16, #17).
+
+**What left recursion does to recursive descent.** The naive rule
+`Expr ::= Expr "union" Expr | ...` cannot be transcribed directly:
+`parse_expr`'s first action would be a recursive call to `parse_expr` before
+any token is consumed, so the parser recurses forever and overflows the
+stack on any input whatsoever.
+
+**Where it is avoided in this grammar.** The grammar in §1.2 never uses
+left recursion. Every previously left-recursive rule was rewritten as a
+right-recursive repetition using the EBNF star:
+
+* `SetExpr ::= JoinExpr ( SetOp JoinExpr )*` — starts with a `JoinExpr`,
+  then loops on operators; the left-associative tree is built by folding
+  each operator into the accumulated left operand.
+* `JoinExpr ::= Unary ( ( "times" Unary ) | ( "join" "[" Cond "]" Unary ) )*`
+  — the same fold for `times` and `join`.
+
+There is no `Expr` appearing as the first symbol of its own right-hand side
+anywhere in §1.2, which is exactly the property that makes an LL-style
+recursive-descent parser terminate.
+
+---
+
+## 5  Sources
+
+* Crafting Interpreters — Robert Nystrom (free online), chapters on scanning
+  and parsing: https://craftinginterpreters.com
+* Wikipedia: *Extended Backus–Naur form*, *Recursive descent parser*,
+  *Maximal munch*, *Operator-precedence parser*
+* Aho, Lam, Sethi & Ullman, *Compilers: Principles, Techniques and Tools*
+  (Dragon Book), §2.2–§2.4 and §4.4, for the formal treatment of grammars,
+  ambiguity and top-down parsing
+* Relax (dbis-uibk.github.io/relax) — the behavioural target for what the
+  operators and schemas are supposed to do, per the project brief, and the
+  place I confirmed semantics like the self-join and projection dedup before
+  writing the grammar
+
+**Where AI assistance was wrong** (several of these are expanded in
+DESIGN_LOG.md): an early AI tokenizer split on whitespace, which silently
+broke rows #1, #5 and #6 (the exact tests that target "no whitespace / comma
+or paren inside a string"); an AI grammar proposal handled `A union B minus C`
+as right-associative and picked Tree 2 in §3, which the test suite (§2.1)
+rejects; an AI lexer emitted `Emp.DID` as three tokens (`Ident`, `Dot`,
+`Ident`), breaking qualified joins until the single-token decision was
+written down here; and a first attempt at quoted strings treated `''` as
+close-then-reopen, so `'O''Brien'` lost its value until row #7's behaviour
+was locked into §1.1.
+
+---
+
+##  Design decisions the spec forces you to make
+
+These are the "decide and document" rows. The grammar above already encodes
+them; this section states them so they can't drift.
+
+### Keywords as attribute names  (row #8)
+
+**Rule:** keywords are tokenized as keywords *everywhere*, unconditionally —
+`select`, `project`, `rename`, `join`, `union`, `intersect`, `minus`,
+`times`, `and`, `or`, `not` never become `Token::Ident`, even when they
+appear where an attribute name would make sense (row #8, `select[union=3](R)`).
+
+Responsibility for accepting `union=3` as "the attribute named union equals
+3" sits in the **parser**: the grammar rule `AttrName ::= IDENT | KEYWORD`
+(implemented as `Parser::parse_attr_name`) accepts any keyword token and
+reinterprets its spelling as the attribute name. This keeps the lexer
+context-free (it never has to know "am I inside `[...]`?") at the cost of a
+small amount of extra leniency in the `AttrName` rule. The same `AttrName`
+rule is reused in three places: condition operands and `project[]`/`rename[]`
+names, relation-definition **attribute lists**, and bare tuple values.
+
+The header's attribute list is where the brief's §4.1 wording ("attribute
+names are identifiers") is deliberately widened: accepting a keyword-spelled
+column makes row #8 executable end-to-end — you can define `R(union) = {1}`
+and then run `select[union=3](R)` against a real column instead of a parse
+that could never succeed.
+
+**Relation names are *not* loosened.** `NAME ::= IDENT` (§1.2): a relation
+cannot be named after a keyword. The §4.2 operators are bare words, so
+allowing `union` as a relation name would collide with the operator's own
+spelling — and even if the header accepted it, query atoms already accept
+only `IDENT`, so a keyword-named relation could never be referenced. A
+keyword in relation-name position is a parse error (expected a relation
+name); a qualified name (`E.D`) is rejected the same way.
+
+### Qualified names  (rows #18–#20)
+
+`Emp.DID` lexes as a single `IDENT` token whose text contains the dot, never
+as `Ident("Emp")`, `Dot`, `Ident("DID")` (§1.1). Anywhere the grammar accepts
+an `AttrName`, a qualified name is therefore automatically legal too. A
+dotted name in `Atom` position (a relation reference) is a semantic error
+("unknown relation"), never special-cased in the parser.
+
+### Duplicate projected attributes  (row #24)
+
+**Rule:** `project[Name, Name](R)` is syntactically valid (the parser doesn't
+check for duplicates) but is rejected at execution time with
+`SemanticError::DuplicateProjectedAttribute`. Rationale: whether a name is a
+duplicate can depend on how you resolve qualified vs. unqualified names
+against the input schema, which is schema information the parser doesn't
+have. This is what `tests/3_semantics.rs::test_24_*` checks.
+
+### Empty projection  (row #17)
+
+`project[](R)` fails to parse: `ProjList ::= AttrName ( "," AttrName )+`
+requires at least one name, and the parser reports
+`ParseError::EmptyProjectionList` at the `]`.
+
+### Relation definitions and set semantics  (rows #1–#9, #5, #6)
+
+Relation blocks (`NAME ( attrs ) = { ... }`) hold comma-separated value
+lists with no line rule: whitespace is insignificant, and a tuple ends
+exactly where the grammar says it ends — when its last value is not
+followed by a comma (`Tuple ::= Value ( "," Value )*`) — so the usual
+one-tuple-per-line layout is just a convention, and a value list may span
+lines freely. A value is a number, a quoted
+string, or a bare word (which must be quoted if it contains a comma, a
+space, a parenthesis or a quote character — §4.1 of the brief). Attribute
+names in the header follow `AttrName ::= IDENT | KEYWORD` (§Keywords as
+attribute names), so a column may be spelled like a keyword — that is what
+lets row #8's `select[union=3](R)` run against a real column; the relation
+name itself is `NAME ::= IDENT`. A relation
+is a **set**: duplicate tuples in the input collapse to one, which is done by
+the engine's own definition of tuple equality, and `project` removes
+duplicates the same way (row #23).

@@ -1,0 +1,242 @@
+Carleton University  ·  School of Computer Science  ·  COMP 3005 Database Management Systems  ·  Fall 2026
+Bonus Project 1
+
+Build a relational algebra engine, starting from a grammar
+Weight 5 bonus points 	Time Two weeks 	Work Individual 	Submit GitHub link on Brightspace
+
+This is the first component of a larger DBMS. Later bonus projects will add storage, indexes, a cost model and a SQL front end on top of what you build here. Everything you write in these two weeks should still be usable then, so write code you can live with.
+
+There is no penalty for skipping this project. It is difficult, and I expect only a small number of students to finish it. Completing it can recover points lost on assignments or the final project.
+1  What this project is really about
+
+Most students who attempt this will begin by asking an AI to write a relational algebra interpreter. You will get something that runs in about four minutes. It will also fail most of the test cases in Section 7, because those cases target exactly the corners a first answer skips.
+
+The work here is not typing code. It is designing a language and defending the design. You will decide what your query language means before you implement it, write that decision down as a grammar, and then build a tokenizer and parser by hand that obey the grammar you wrote. After that you will make the operators correct on inputs that are awkward rather than tidy, and finally you will measure your own system on data large enough that its weaknesses become visible in seconds.
+
+Use AI freely. You will need many rounds with it, and you will need to read real material on grammars to recognise when it is wrong. During grading I will ask you to explain any line of your code and the origin of any number in your report.
+2  Learning outcomes
+
+When you finish this project you should be able to do the following.
+
+Write a grammar
+    Explain what a context-free grammar is, express one in EBNF, and state which language your grammar generates.
+Recognise and remove ambiguity
+    Demonstrate that a grammar is ambiguous by exhibiting two parse trees for a single input, then remove the ambiguity by stratifying the grammar into precedence levels.
+Choose a parsing strategy
+    Justify the strategy you used and explain what left recursion does to it.
+Tokenize by hand
+    Scan a character stream into tokens, handling maximal munch, quoted strings and input with no whitespace at all.
+Build and walk a parse tree
+    Turn a query into a tree of operations and evaluate that tree bottom up.
+Implement the algebra correctly
+    Write the six core operators from scratch with correct set semantics and correct output schemas.
+Fail usefully
+    Detect invalid queries and report them with a message and a position instead of a stack trace.
+Measure your own system
+    Generate test data at several scales, instrument your code, and explain the shape of the curve you get.
+Predict what you cannot run
+    Estimate the cost of a join on inputs far larger than you can afford to execute, and justify the estimate from measured data.
+
+3  Rules and scope
+Not allowed
+
+    No regular expression library anywhere in the tokenizer or parser.
+    No parser generators such as ANTLR, Lark, PLY, pyparsing or yacc.
+    No eval or exec to evaluate conditions.
+    No data processing libraries for the operators. No pandas, no numpy, no embedded SQL engine, and no library cross product standing in for your own.
+    No built-in deduplication that bypasses your own definition of tuple equality.
+
+	
+Allowed
+
+    Any language you are comfortable in. Python, Java, C++, Go and Rust are all fine.
+    Standard file access, timing functions, and a plotting library for the report only.
+    AI assistance.
+
+Out of scope for this component
+
+Nulls and three-valued logic are excluded. Every attribute has a value. You may also ignore how data is read from or written to disk, since you will load everything into memory. Query optimisation and algebraic rewriting are not part of this project, so execute the tree exactly as the user wrote it. Indexes, hash joins and sort-merge joins are likewise excluded. Nested loops are expected, and their cost is one of the things you are meant to discover.
+4  The language you must support
+
+You are implementing the concrete syntax below. You may additionally accept the Unicode symbols if you want, but the ASCII form is what will be tested.
+4.1  Relation definitions
+
+// employees and their departments
+Employees (EID, Name, Age, DID) = {
+  E1, John, 32, D1
+  E2, Alice, 28, D2
+  E3, Bob, 29, D1
+}
+
+Attribute names are identifiers, and every tuple line carries exactly as many values as the relation has attributes. A value is a number or a string. A string may be written bare, but it must be quoted with single quotes if it contains a comma, a space, a parenthesis or a quote character, and inside a quoted string two single quotes stand for one literal quote. A relation is a set, so duplicate tuples in the input collapse to one. Lines starting with // are comments and blank lines are ignored.
+4.2  Queries
+
+The three unary operators take their parameter in square brackets and their input in parentheses.
+
+select[ <condition> ]( <expr> )
+project[ <attribute-list> ]( <expr> )
+rename[ <new-relation-name> ]( <expr> )
+
+The binary operators are written infix.
+
+<expr> union     <expr>
+<expr> intersect <expr>
+<expr> minus     <expr>
+<expr> times     <expr>
+<expr> join[ <condition> ] <expr>
+
+Conditions are comparisons combined with and, or, not and parentheses. A comparison has an operand on each side and one of the operators =, !=, <, <=, > or >=. An operand is a number, a string, or an attribute name that may be qualified with a relation name as in Emp.DID.
+4.3  Semantics you must get right
+Operator 	Output schema and behaviour
+select 	Same schema as the input. The condition may compare two attributes, not only an attribute against a constant.
+project 	The listed attributes in the listed order, with duplicate tuples removed afterwards.
+times 	All attributes of both inputs, qualified by relation name. If qualified names still collide, that is an error.
+join[c] 	Defined as times followed by select[c]. This is a theta join, not a natural join.
+union, intersect, minus 	Schema of the left input. Both sides must be union compatible.
+rename 	Same attributes under a new relation name. This is what makes self joins expressible.
+
+Union compatibility here means the same number of attributes, the same attribute names in the same order, and compatible types position by position. Anything else is an error. A comparison between a number and a string is also an error rather than a silent false.
+5  The grammar document
+
+You will submit a file named GRAMMAR.md. It is worth a fifth of the project on its own, and it should be written before you write the parser, not after. It contains five things.
+5.1  The grammar itself
+
+Your full grammar in EBNF, covering everything in Section 4, including conditions, relation definitions and literals.
+5.2  Precedence and associativity
+
+A table giving the precedence level and associativity of every operator, together with the grammar rules that enforce them. You have to decide, for example, whether A union B minus C means (A union B) minus C or A union (B minus C), and whether A minus B minus C associates to the left or to the right. These are your decisions, but they must live in the grammar rather than in special cases inside your parser.
+5.3  An ambiguity demonstration
+
+Take this deliberately naive grammar.
+
+Expr ::= Expr "union" Expr
+       | Expr "minus" Expr
+       | "(" Expr ")"
+       | IDENT
+
+Draw two different parse trees for the input A union B minus C. Then give a concrete instance of the three relations where the two trees produce different results, and show both results. Finally give the stratified grammar that removes the ambiguity and explain which of the two trees it forces.
+5.4  A parsing strategy justification
+
+State which parsing strategy you used and why. If you wrote a recursive descent parser, explain what left recursion does to it and point to the exact place in your grammar where you avoided or removed it. If you used a different strategy, say what it buys you.
+5.5  Sources
+
+What you read, and where AI assistance turned out to be wrong. A reasonable starting set is the scanning and parsing chapters of Crafting Interpreters, which is free online, the Wikipedia articles on EBNF, recursive descent parsing, maximal munch and operator precedence, and sections 2.2 to 2.4 and 4.4 of the Dragon Book if you want the formal treatment.
+6  What the program must do
+6.1  The tokenizer is written by hand
+
+A character-by-character scanner. It reads one character, decides which token is starting, and consumes characters until that token ends. It must implement maximal munch, which means that on seeing > it checks the following character before deciding whether it produced > or >=. Every token should carry its position in the input, because the error messages in Section 6.3 depend on it.
+6.2  The parse tree must be visible
+
+Your program must be able to print the parse tree for a query without executing it.
+
+$ python ra.py --tree "project[Name](select[Age>30](Employees))"
+
+Project(attrs=[Name])
+└── Select(cond=Gt(Attr(Age), Num(30)))
+    └── Relation(Employees)
+
+The drawing style is yours. This feature is graded, and it is what I will use during the oral check, so make it readable.
+6.3  Errors are reported, never thrown
+
+Every error produces a message that names the problem, and for parse errors a position in the input. Your program must never show a stack trace. You need at least five categories working. Lexical errors such as an unterminated string. Syntax errors such as unbalanced parentheses or a missing operand. Name errors, where a query refers to an unknown relation or attribute. Schema errors, such as a union of incompatible relations. Type errors, such as comparing a number to a string.
+7  Required test cases
+
+All of these must work, or must fail with a clear message where the table says so. Put them in your test suite. I will run my own copy of this list against your submission.
+7.1  Tokenizer
+1 	select[x1=3](R) 	Parses. There is no whitespace anywhere, so x1, = and 3 must be separated by the scanner, not by splitting on spaces.
+2 	select[ x1 = 3 ](R) 	Produces a parse tree identical to case 1.
+3 	select[Age>=30](R) 	One >= token, not > followed by =.
+4 	select[Age>-30](R) 	Tokens are > and -30. Maximal munch must not invent a >- operator.
+5 	select[Name='Bob)'](R) 	The parenthesis is inside a string. Any approach that matches parentheses before tokenizing breaks here.
+6 	select[Name='a,b'](R) 	The comma is inside a string and does not separate anything.
+7 	select[Name='O''Brien'](R) 	The doubled quote is one literal quote character in the value.
+8 	select[union=3](R) 	An attribute may be spelled like a keyword. Decide how you resolve this and document the rule in GRAMMAR.md.
+9 	select[Name='Bob](R) 	Lexical error with a position. The string is never closed.
+7.2  Grammar and precedence
+10 	A union B minus C 	Groups according to your documented rule, and the printed tree must match what GRAMMAR.md says.
+11 	A minus B minus C 	Associativity matches your documented rule. You must also show a data instance where the other grouping gives a different answer.
+12 	select[not (a=1 and b=2) or c>3](R) 	not binds tighter than and, which binds tighter than or.
+13 	select[a=1 and b=2 or c=3](R) 	Groups as (a=1 and b=2) or c=3.
+14 	project[Name](select[Age>30](select[DID='D1'](Employees))) 	Three levels of nesting evaluate in the right order.
+15 	(A union B) minus (C intersect D) 	Explicit parentheses override precedence.
+16 	select[Age>30](R 	Syntax error with a position, naming the missing parenthesis.
+17 	project[](R) 	Syntax error. An empty attribute list is not a valid projection.
+7.3  Semantics
+18 	select[A=B](R) where A and B are both attributes 	Compares two columns against each other, not a column against the string B.
+19 	Emp join[Emp.DID=Dept.DID] Dept 	Qualified names resolve, and the output schema keeps both DID columns distinguishable.
+20 	rename[E2](Emp) join[Emp.MgrID=E2.EID] Emp 	A self join. Explain in your README why this query is unanswerable without rename.
+21 	R union S with different schemas 	Schema error. Not a crash, and not a silently wrong answer.
+22 	select[Age>'30'](R) 	Type error.
+23 	project[DID](Employees) on the data in Section 4.1 	Returns two tuples, not three. Projection removes duplicates.
+24 	project[Name, Name](R) 	Decide and document. Either a clear error or a stated rule.
+25 	Any query returning no tuples 	Prints the schema and an empty body, cleanly.
+8  The performance study
+
+This is where the project stops being a parsing exercise and starts being a database one. It is also the part that cannot be produced without running your own code.
+8.1  Write a data generator
+
+A separate program that writes relation files at a size you choose. It must let you control the number of tuples in each relation and the match rate, meaning roughly how many tuples of the second relation each tuple of the first will join with. Generate R(a, b) and S(b, c).
+8.2  Instrument the engine
+
+Add a counter that increments once for every pair of tuples your join compares, and once for every tuple your selection examines. Count these. Do not estimate them.
+8.3  Run the experiment
+
+Run R join[R.b=S.b] S at 1000, 2000, 4000, 8000, 16000, 32000 and 64000 tuples per relation, and fill in this table in REPORT.md.
+n 	m 	comparisons 	wall time (s) 	output tuples
+1000 	1000 	  	  	 
+2000 	2000 	  	  	 
+and so on, up to 64000
+8.4  Then answer these questions
+
+State your machine, language and version at the top of the report, and answer each of the following with evidence from your own measurements.
+
+    What is the exact relationship between n, m and your comparison count? Does the measured count match the formula exactly? If it does not, explain the discrepancy.
+    Plot time against n on log-log axes. What is the slope, and what does that slope tell you about the algorithm?
+    Measure select and project at the same sizes. How do those curves differ from the join, and why?
+    Using your measurements, predict how long the join would take with one million tuples on each side. Show the arithmetic. Do not run it.
+    Does changing the match rate change the comparison count? Does it change the wall time? Explain why those two answers differ.
+    In one paragraph, describe what you would have to change to make the million-tuple join feasible. You do not have to implement it.
+
+9  Deliverables
+
+One GitHub repository containing the following.
+File 	Contents
+GRAMMAR.md 	Everything described in Section 5.
+REPORT.md 	The performance study from Section 8.
+DESIGN_LOG.md 	A dated diary, described below.
+README.md 	How to run it, what is supported, known limitations.
+source 	Tokenizer, parser, tree printer, operators, data generator.
+tests/ 	All 25 cases from Section 7, plus your own.
+
+The design log. One short entry per working session, dated. Each entry says what you were trying to do, what you tried, and what broke. Include at least three specific occasions where AI assistance gave you something wrong, slow or incomplete, what the problem was, and how you found it. Two or three sentences each is enough. A log whose entries say that you asked an AI and it worked scores zero on this component.
+
+You also submit a video of roughly five minutes. Show the system running. Show the parse tree for case 10 or 11 and explain the grouping it produces. Show one number from your performance report and say what it means. Then walk through your code structure at a high level. Submit the repository link on Brightspace.
+10  Grading
+
+I grade every submission personally (No TAs). During the oral check I will choose a function and ask you to explain it, and I will choose a number in your report and ask where it came from. Code you cannot explain scores zero whether or not it runs.
+Component 	Weight
+Grammar document, including the ambiguity demonstration 	20
+Tokenizer, parser and parse tree printing 	25
+Operator correctness and schema handling 	15
+Error handling 	10
+Performance study and its explanations 	20
+Design log 	5
+Video and oral check 	5
+Total 	100
+11  A two week plan
+
+You have two weeks. The schedule below is a suggestion, not a requirement, but the shape of it matters. The first three days produce no working code at all, and that is deliberate. Almost every painful bug in this project comes from a grammar that was never written down.
+Days 	Focus
+1 to 2 	Practise with Relax. Read about context-free grammars, EBNF and recursive descent. Write no code.
+3 	First draft of your EBNF, with precedence and associativity decided and written down.
+4 to 5 	Tokenizer, with cases 1 to 9 passing.
+6 to 7 	Parser, parse tree and the tree printer. Cases 10 to 17.
+8 to 9 	The six operators and schema handling. Cases 18 to 25.
+10 	Error handling across all five categories.
+11 	Data generator and instrumentation.
+12 	Run the experiment and write REPORT.md.
+13 	Finish GRAMMAR.md, including the ambiguity demonstration, now that you know what your parser really does.
+14 	Clean up, finish the design log, record the video.
+12  Before you start
+
+Spend an hour with the Relax system at dbis-uibk.github.io/relax. Define a few relations. Run selections, projections, joins and set operations. Watch what it does with a self join. You are building a smaller version of this, and it helps to know how the target behaves before you design your own.

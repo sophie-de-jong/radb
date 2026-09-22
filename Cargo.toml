@@ -1,0 +1,21 @@
+[package]
+name = "radb"
+version = "0.1.0"
+edition = "2021"
+
+# The library and its test suite run on std alone. The two binaries use
+# `clap` for their command-line interfaces.
+
+[[bin]]
+name = "radb-study"
+path = "src/bin/radb_study.rs"
+
+[[bin]]
+name = "radb"
+path = "src/bin/radb.rs"
+
+[profile.release]
+opt-level = 3
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
