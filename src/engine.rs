@@ -711,7 +711,7 @@ fn check_col_duplicates(cols: &[String]) -> Result<(), SemanticError> {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Stats {
     pub join_comparisons: u64,
-    pub selection_examinations: u64,
+    pub select_comparisons: u64,
 }
 
 pub struct Engine {
@@ -757,7 +757,7 @@ impl Engine {
                 let relation = self.execute(input)?;
                 let rc = RCond::resolve(predicate, &relation.schema)?;
                 relation.select(move |row| {
-                    self.stats.selection_examinations += 1;
+                    self.stats.select_comparisons += 1;
                     rc.eval_single(row)
                 })
             }
@@ -1068,7 +1068,7 @@ mod tests {
         let result = eng.execute(&expr).expect("select should run");
         assert_eq!(result.len(), 0);
         assert_eq!(
-            eng.stats.selection_examinations, 7,
+            eng.stats.select_comparisons, 7,
             "every tuple was examined even though none matched"
         );
     }
@@ -1080,7 +1080,7 @@ mod tests {
         let expr = parse_query("project[b](select[a>=0](R))").unwrap();
         let result = eng.execute(&expr).expect("query should run");
         assert_eq!(result.len(), 5);
-        assert_eq!(eng.stats.selection_examinations, 5);
+        assert_eq!(eng.stats.select_comparisons, 5);
         assert_eq!(eng.stats.join_comparisons, 0);
     }
 
@@ -1090,8 +1090,8 @@ mod tests {
         eng.load("R", make(3));
         let expr = parse_query("select[a>=0](R)").unwrap();
         let _ = eng.execute(&expr).expect("select should run");
-        assert_eq!(eng.stats.selection_examinations, 3);
+        assert_eq!(eng.stats.select_comparisons, 3);
         eng.reset_stats();
-        assert_eq!(eng.stats.selection_examinations, 0);
+        assert_eq!(eng.stats.select_comparisons, 0);
     }
 }

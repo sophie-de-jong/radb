@@ -8,13 +8,12 @@
 //!           of §4.1.
 //! `study` — parses the §8.3 query from source text through `radb::parse`
 //!           (no hand-built ASTs) and times join at every size, then select
-//!           and project at the same sizes (§8.4 q3). Progress prints live
-//!           to stderr (each size's row appears the moment it finishes), and
-//!           stdout carries only the two paste-ready tables — the §8.3 join
-//!           table exactly as INSTRUCTIONS.txt defines it (n, m,
-//!           comparisons, wall time (s), output tuples) followed by the
-//!           select/project table, aligned with thousands separators, so
-//!           `radb-study study > results.md` captures just the deliverables.
+//!           and project at the same sizes (§8.4 q3). Progress and the
+//!           per-size select/project figures print to stderr (each size's row
+//!           appears the moment it finishes), and stdout carries only the
+//!           §8.3 join table — n, m, comparisons, wall time (s), output
+//!           tuples — so `radb-study study > join_table.md` captures just the
+//!           deliverable.
 //!
 //! Both subcommands' flag lists come from clap (`radb-study --help`).
 
@@ -54,8 +53,9 @@ enum Command {
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
-    /// Time join (§8.3) plus select/project (§8.4 q3) at several sizes;
-    /// prints the instruction-defined join table, then a select/project table.
+    /// Time join (§8.3) plus select/project (§8.4 q3) at several sizes.
+    /// Prints the §8.3 join table on stdout; the per-size select and
+    /// project figures, and progress, go to stderr.
     Study {
         /// Relation sizes to benchmark (comma-separated).
         #[arg(
@@ -97,14 +97,14 @@ fn study(sizes: Vec<usize>, matches: f64, seed: u64) {
     let join_q = parse_query("R join[R.b=S.b] S").expect("join query should parse");
     let project_q = parse_query("project[b](R)").expect("project query should parse");
 
-    #[cfg(debug_assertions)]
-    eprintln!("  warning    : debug build — the large joins take many minutes; use --release");
-    eprintln!("radb-study — §8.3 join benchmark, then §8.4 q3 select/project");
+    eprintln!("radb-study - §8.3 join benchmark");
     eprintln!("  sizes      : {sizes:?}");
     eprintln!("  match rate : ~{matches}, seed {seed}\n");
 
-    let mut join_rows: Vec<(usize, u64, f64, usize)> = Vec::with_capacity(sizes.len());
-    let mut sp_rows: Vec<(usize, f64, u64, f64)> = Vec::with_capacity(sizes.len());
+    #[cfg(debug_assertions)]
+    eprintln!("  warning    : debug build - the large joins take many minutes; use --release");
+
+    let mut table_rows: Vec<Vec<String>> = Vec::with_capacity(sizes.len());
     let started = Instant::now();
 
     for &n in &sizes {
@@ -123,61 +123,29 @@ fn study(sizes: Vec<usize>, matches: f64, seed: u64) {
         let output = eng.execute(&join_q).expect("join failed").len();
         let jt = t.elapsed().as_secs_f64();
         let comps = eng.stats.join_comparisons;
-        eprintln!("  n = {n:<6} join    {comps} comparisons in {jt:8.3} s - {output} tuples");
-        join_rows.push((n, comps, jt, output));
+        eprintln!("  n = {n:<6} join    in {jt:.3} s ({comps} comparisons - {output} tuples)");
+        table_rows.push(vec![n.to_string(), n.to_string(), comps.to_string(), format!("{jt:.3}"), output.to_string()]);
 
         eng.reset_stats();
         let t = Instant::now();
-        let _ = eng.execute(&select_q).expect("select failed");
+        let output = eng.execute(&select_q).expect("select failed").len();
         let st = t.elapsed().as_secs_f64();
-        let examined = eng.stats.selection_examinations;
+        let comps = eng.stats.select_comparisons;
+        eprintln!("  n = {n:<6} select  in {st:.3} s ({comps} comparisons - {output} tuples)");
 
         eng.reset_stats();
         let t = Instant::now();
         let _ = eng.execute(&project_q).expect("project failed");
         let pt = t.elapsed().as_secs_f64();
-        eprintln!("  n = {n:<6} select  {st:8.4} s (examined {examined}) · project {pt:8.4} s");
-        sp_rows.push((n, st, examined, pt));
+        eprintln!("  n = {n:<6} project in {pt:.3} s");
     }
 
     eprintln!("\n  finished all {} sizes in {:.1} s\n", sizes.len(), started.elapsed().as_secs_f64());
 
-    print_table(
-        &["n", "m", "comparisons", "wall time (s)", "output tuples"],
-        &join_rows
-            .iter()
-            .map(|&(n, comps, jt, out)| {
-                vec![
-                    n.to_string(),
-                    n.to_string(),
-                    comps.to_string(),
-                    format!("{jt:.3}"),
-                    out.to_string(),
-                ]
-            })
-            .collect::<Vec<_>>(),
-    );
-    eprintln!();
-    print_table(
-        &["n", "select time (s)", "select examinations", "project time (s)"],
-        &sp_rows
-            .iter()
-            .map(|&(n, st, examined, pt)| {
-                vec![
-                    n.to_string(),
-                    format!("{st:.4}"),
-                    examined.to_string(),
-                    format!("{pt:.4}"),
-                ]
-            })
-            .collect::<Vec<_>>(),
-    );
+    let headers = ["n", "m", "comparisons", "wall time (s)", "output tuples"];
+    print_table(&headers, &table_rows);
 }
 
-/// Prints a markdown table whose columns also line up in a terminal: every
-/// cell is padded to its column's widest entry and right-aligned, and the
-/// separator row right-aligns each column (`---:`), the usual style for
-/// numeric tables.
 fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     let widths: Vec<usize> = (0..headers.len())
         .map(|c| {

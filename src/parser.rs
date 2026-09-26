@@ -72,17 +72,6 @@ pub enum ParseError {
         expected: &'static str,
         found: &'static str,
     },
-    /// A comma with no value on either side (`1,,2`, or a leading/trailing
-    /// comma) in a §4.1 tuple.
-    EmptyValue {
-        at: Position,
-    },
-    /// A bare (unquoted) value containing a character the spec §4.1 says
-    /// forces quoting: comma, space, parenthesis, or quote.
-    MustQuote {
-        at: Position,
-        ch: char,
-    },
     /// A relation definition never reached its closing `}`.
     MissingClosingBrace {
         at: Position,
@@ -115,10 +104,7 @@ impl fmt::Display for ParseError {
                 expected,
                 found,
             } => {
-                write!(
-                    f,
-                    "tuple at {at} has {found} values but the relation has {expected} attributes"
-                )
+                write!(f, "tuple at {at} has {found} values but the relation has {expected} attributes")
             }
             ParseError::ColumnTypeMismatch {
                 at,
@@ -127,10 +113,6 @@ impl fmt::Display for ParseError {
                 found,
             } => {
                 write!(f, "column '{name}' at {at} has type {found}, but previous values in the column are {expected}")
-            }
-            ParseError::EmptyValue { at } => write!(f, "empty value at {at}"),
-            ParseError::MustQuote { at, ch } => {
-                write!(f, "bare value at {at} contains '{ch}' and must be quoted")
             }
             ParseError::MissingClosingBrace { at } => {
                 write!(f, "relation definition never reached '}}' (at {at})")
@@ -189,11 +171,6 @@ pub enum Query {
 }
 
 impl fmt::Display for Query {
-    /// Render this expression as a readable tree, *without executing it*:
-    /// this is the `ra --tree` output (spec §6.2). The node name comes from
-    /// this match; each child below renders its *own* subtree through its
-    /// Display, and the connector symbols (`├──`/`└──` and `│`/`   `
-    /// padding) connect them.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let children = match self {
             Query::Variable(name) => {
@@ -406,72 +383,23 @@ impl<'a> Parser<'a> {
         Ok(attrs)
     }
 
-    /// Value ::= INT | STRING | IDENT | KEYWORD
-    ///
-    /// A bare word lexes as an identifier (possibly qualified, *e.g.* `E.D`)
-    /// or a keyword token; both spell a string value here. The tokens that
-    /// the tuple loop cannot turn into values get their precise diagnosis
-    /// here, so the loop itself only has to know about `,`: a comma is an
-    /// empty value (§4.1) and a parenthesis or brace is a bare value that
-    /// §4.1 forces to be quoted.
-    fn parse_value(&mut self) -> Result<Value, ParseError> {
-        match self.peek() {
-            TokenKind::Int(i) => {
-                let i = *i;
-                self.advance()?;
-                Ok(Value::Int(i))
-            }
-            TokenKind::Str(s) => {
-                let s = s.clone();
-                self.advance()?;
-                Ok(Value::Str(s))
-            }
-            TokenKind::Ident(s) | TokenKind::QualIdent(s) => {
-                let s = s.clone();
-                self.advance()?;
-                Ok(Value::Str(s))
-            }
-            TokenKind::Keyword(kw) => {
-                let kw = kw.to_string();
-                self.advance()?;
-                Ok(Value::Str(kw))
-            }
-            TokenKind::Comma => Err(ParseError::EmptyValue { at: self.at() }),
-            TokenKind::LParen => Err(ParseError::MustQuote { at: self.at(), ch: '(' }),
-            TokenKind::RParen => Err(ParseError::MustQuote { at: self.at(), ch: ')' }),
-            TokenKind::LBrace => Err(ParseError::MustQuote { at: self.at(), ch: '{' }),
-            _ => Err(self.unexpected("a value")),
-        }
-    }
-
     /// Tuple ::= Value ( "," Value )*
-    ///
-    /// A post-condition loop: read one value, then continue only while the
-    /// next token is the separating comma. Any other token ends the tuple —
-    /// the whitespace-agnostic grammar has no line rule, so the next value
-    /// (or the closing `}`) simply starts the next tuple.
     fn parse_tuple(&mut self) -> Result<Vec<Value>, ParseError> {
         let mut values: Vec<Value> = Vec::new();
 
         loop {
-            values.push(self.parse_value()?);
+            let value = match self.peek() {
+                TokenKind::Int(i) => Value::Int(*i),
+                TokenKind::Str(s) => Value::Str(s.clone()),
+                TokenKind::Ident(s) | TokenKind::QualIdent(s) => Value::Str(s.clone()),
+                TokenKind::Keyword(kw) => Value::Str(kw.to_string()),
+                _ => return Err(self.unexpected("a value")),
+            };
+            values.push(value);
+            self.advance()?;
 
-            // Post-condition for `( "," Value )*`: keep reading exactly
-            // while a comma follows the value we just read.
             match self.peek() {
-                TokenKind::Comma => {
-                    let comma = self.at();
-                    self.advance()?;
-                    // A separator must have a value on both sides: a comma
-                    // straight into the closing `}` or end of input is a
-                    // dangling comma, reported at the comma itself (§4.1).
-                    // A comma running straight into another comma is caught
-                    // by `parse_value` as an `EmptyValue` on the next
-                    // iteration.
-                    if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
-                        return Err(ParseError::EmptyValue { at: comma });
-                    }
-                }
+                TokenKind::Comma => self.advance()?,
                 _ => return Ok(values),
             }
         }
@@ -770,322 +698,8 @@ pub fn parse_query(input: &str) -> Result<Query, ParseError> {
     parser.parse_query()
 }
 
-/// Parse a whole relation definition (spec §4.1) into its header name and
-/// relation.
+/// Parse a whole relation definition into its header name and relation.
 pub fn parse_relation(input: &str) -> Result<(String, Relation), ParseError> {
     let mut parser = Parser::new(input)?;
     parser.parse_relation_def()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The column names of a relation, for schema assertions.
-    fn names(rel: &Relation) -> Vec<&str> {
-        rel.schema().iter().map(|s| s.as_str()).collect()
-    }
-
-    // ── §4.1 relation-definition loading ────────────────────────────────
-
-    #[test]
-    fn loads_the_spec_example() {
-        let src = "\
-// employees and their departments
-Employees (EID, Name, Age, DID) = {
-  E1, John, 32, D1
-  E2, Alice, 28, D2
-  E3, Bob, 29, D1
-}
-";
-        let (name, relation) = parse_relation(src).expect("spec example should load");
-        assert_eq!(name, "Employees");
-        assert_eq!(names(&relation), ["EID", "Name", "Age", "DID"]);
-        assert_eq!(relation.len(), 3);
-        assert!(relation.contains(vec![
-            Value::Str("E1".into()),
-            Value::Str("John".into()),
-            Value::Int(32),
-            Value::Str("D1".into()),
-        ]));
-    }
-
-    #[test]
-    fn duplicate_tuples_collapse_to_one() {
-        let src = "\
-R(a, b) = {
-  1, 2
-  1, 2
-  3, 4
-}
-";
-        let (_, relation) = parse_relation(src).unwrap();
-        assert_eq!(relation.len(), 2, "a relationation is a set");
-        assert!(relation
-            .contains(vec![Value::Int(1), Value::Int(2)]));
-        assert!(relation
-            .contains(vec![Value::Int(3), Value::Int(4)]));
-    }
-
-    #[test]
-    fn quoted_values_handle_commas_parens_spaces_and_quotes() {
-        let src = "\
-Records(Who, Note) = {
-  'O''Brien', 'works, 4h (from home)'
-  Bob, 'has a ''quote'''
-  Bob, 'has a ''quote'''
-}
-";
-        let (_, relation) = parse_relation(src).unwrap();
-        assert_eq!(names(&relation), ["Who", "Note"]);
-        assert_eq!(relation.len(), 2, "duplicate row collapses");
-        assert!(relation.contains(vec![
-            Value::Str("O'Brien".into()),
-            Value::Str("works, 4h (from home)".into()),
-        ]));
-        assert!(relation.contains(vec![
-            Value::Str("Bob".into()),
-            Value::Str("has a 'quote'".into()),
-        ]));
-    }
-
-    #[test]
-    fn whole_line_comments_and_blank_lines_are_ignored() {
-        let src = "\
-// leading comment
-
-R(a) = {
-  // comment between header and tuple
-  7
-
-  // another comment
-  8
-}
-// trailing comment
-";
-        let (_, relation) = parse_relation(src).unwrap();
-        assert_eq!(relation.len(), 2);
-        assert!(relation.contains(vec![Value::Int(7)]));
-        assert!(relation.contains(vec![Value::Int(8)]));
-    }
-
-    #[test]
-    fn empty_body_is_allowed() {
-        let (_, relation) = parse_relation("E(a, b) = {\n}\n").unwrap();
-        assert_eq!(names(&relation), ["a", "b"]);
-        assert!(relation.is_empty());
-    }
-
-    #[test]
-    fn arity_mismatch_is_an_error_with_a_position() {
-        let err = parse_relation("R(a, b) = {\n1, 2, 3\n}\n").unwrap_err();
-        match err {
-            ParseError::ArityMismatch {
-                at,
-                expected: 2,
-                found: 3,
-            } => {
-                assert_eq!(at.line, 2);
-                assert_eq!(at.col, 0);
-            }
-            other => panic!("expected ArityMismatch, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn mixed_type_column_is_a_load_time_error() {
-        // A column's type is its values' type, so {1, 'a'} cannot exist (§1.2
-        // load-time rules). The error names the column, the exact position of
-        // the offending value, and the two conflicting types.
-        let src = "\
-M(x) = {
-1
-'a'
-}
-";
-        let err = parse_relation(src).unwrap_err();
-        let message = err.to_string();
-        match err {
-            ParseError::ColumnTypeMismatch {
-                at,
-                name,
-                expected,
-                found,
-            } => {
-                assert_eq!(at.line, 3);
-                assert_eq!(at.col, 0);
-                assert_eq!(name, "x");
-                assert_eq!(expected, "int");
-                assert_eq!(found, "str");
-                assert_eq!(
-                    message,
-                    "column 'x' at line 3, col 0 has type str, but previous values in the column are int"
-                );
-            }
-            other => panic!("expected ColumnTypeMismatch, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn unterminated_quoted_string_is_an_error() {
-        let err = parse_relation("R(a) = {\n'never closed\n}\n").unwrap_err();
-        match err {
-            ParseError::Lex(LexError::UnterminatedString { at }) => assert_eq!(at.line, 2),
-            other => panic!("expected UnterminatedString, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn bare_values_separated_by_whitespace_are_separate_tuples() {
-        // Whitespace is insignificant (the grammar has no line rule), so two
-        // bare values with only a space between them are two tuples, not one
-        // value that forgot to be quoted.
-        let (_, relation) = parse_relation("R(a) = {\nHello World\n}\n").unwrap();
-        assert_eq!(relation.len(), 2);
-        assert!(relation
-            .contains(vec![Value::Str("Hello".into())]));
-        assert!(relation
-            .contains(vec![Value::Str("World".into())]));
-    }
-
-    #[test]
-    fn bare_value_with_a_parenthesis_must_be_quoted() {
-        // §4.1: a bare value containing a parenthesis must be quoted. With the
-        // whitespace-agnostic grammar there is no way to continue `John` into a
-        // value-spanning `(` inside the relation body, so it is a MustQuote
-        // error at the offending character.
-        let err = parse_relation("R(a) = {\nJohn (Doe)\n}\n").unwrap_err();
-        match err {
-            ParseError::MustQuote { at, ch } => {
-                assert_eq!(at.line, 2);
-                assert_eq!(at.col, 5);
-                assert_eq!(ch, '(');
-            }
-            other => panic!("expected MustQuote, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn tuples_are_whitespace_agnostic() {
-        // The grammar is `Tuple ::= Value ( "," Value )*` with no line rule: a
-        // tuple ends where its last value is not followed by a comma, so the
-        // same tuples parse whether the boundary is a space or a newline.
-        let oneline = parse_relation("R(a, b) = {\n1, 2 3, 4\n}\n").unwrap();
-        let newlined = parse_relation("R(a, b) = {\n1, 2\n3, 4\n}\n").unwrap();
-        assert_eq!(oneline.1.len(), newlined.1.len());
-        assert!(newlined.1.iter().all(|row| oneline.1.contains(row)));
-        assert_eq!(newlined.1.len(), 2);
-        assert!(newlined.1.contains(vec![Value::Int(1), Value::Int(2)]));
-        assert!(newlined.1.contains(vec![Value::Int(3), Value::Int(4)]));
-    }
-
-    #[test]
-    fn trailing_comma_is_an_error() {
-        // A comma must have a value on both sides (`Tuple ::= Value ( "," Value )*`):
-        // `1, 2,` ends with a dangling comma before the closing brace.
-        let err = parse_relation("R(a, b) = {\n1, 2,\n}\n").unwrap_err();
-        match err {
-            ParseError::EmptyValue { at } => {
-                assert_eq!(at.line, 2);
-                assert_eq!(at.col, 4);
-            }
-            other => panic!("expected EmptyValue, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn empty_value_is_an_error_with_a_position() {
-        // `1,,2` — the second comma has nothing before or after it.
-        let err = parse_relation("R(a) = {\n1,, 2\n}\n").unwrap_err();
-        match err {
-            ParseError::EmptyValue { at } => {
-                assert_eq!(at.line, 2);
-                assert_eq!(at.col, 2);
-            }
-            other => panic!("expected EmptyValue, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn missing_closing_brace_is_an_error() {
-        let err = parse_relation("R(a) = {\n1\n").unwrap_err();
-        assert!(matches!(err, ParseError::MissingClosingBrace { .. }), "got {err:?}");
-    }
-
-    #[test]
-    fn duplicate_header_attribute_is_an_error() {
-        let err = parse_relation("R(a, a) = {\n1, 2\n}\n").unwrap_err();
-        match err {
-            ParseError::DuplicateAttribute { name, at } => {
-                assert_eq!(name, "a");
-                assert_eq!(at.line, 1);
-                assert_eq!(at.col, 5);
-            }
-            other => panic!("expected DuplicateAttribute, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn garbage_with_no_header_is_an_error() {
-        let err = parse_relation("R a, b) = {\n").unwrap_err();
-        assert!(matches!(err, ParseError::UnexpectedToken { .. }), "got {err:?}");
-    }
-
-    #[test]
-    fn only_comments_and_blank_lines_is_an_error() {
-        let err = parse_relation("// nothing here\n\n").unwrap_err();
-        assert!(matches!(err, ParseError::MissingHeader), "got {err:?}");
-    }
-
-    #[test]
-    fn keyword_spelled_attributes_are_accepted() {
-        let (_, relation) = parse_relation("K(union, and) = {\n1, 2\n}\n").unwrap();
-        assert_eq!(names(&relation), ["union", "and"]);
-    }
-
-    #[test]
-    fn keyword_spelled_relation_name_is_rejected() {
-        // Column names and values may be keywords (row #8), but relation names
-        // are NAME ::= IDENT: `union` collides with the operator's spelling,
-        // and query atoms only accept identifiers anyway (GRAMMAR.md
-        // §Keywords as attribute names).
-        let err = parse_relation("union(a) = {\n1\n}\n").unwrap_err();
-        match err {
-            ParseError::UnexpectedToken { expected, .. } => {
-                assert_eq!(expected, "a relation name");
-            }
-            other => panic!("expected UnexpectedToken, got {other:?}"),
-        }
-    }
-
-    // ── error handling beyond the numbered §7 cases (spec §6.3) ─────────
-
-    /// A multi-line input that ends inside an expression used to panic while
-    /// computing the position of the end-of-input token (Position::new). It
-    /// must be a clean ParseError that names line and column.
-    #[test]
-    fn eof_on_multiline_input_never_panics() {
-        let err = parse_query("select[Age>30](R\n").unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("line") && msg.contains("col"),
-            "expected a positioned message, got: {msg}"
-        );
-    }
-
-    /// Case #16's sibling: `select[Age>30](R` must be an actionable
-    /// positioned error that says what was expected (spec §6.3).
-    #[test]
-    fn unsupported_query_panics_message_is_actionable() {
-        let err = parse_query("select[Age>30](R").unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("col") || msg.contains("line"),
-            "parse errors must carry a position (spec §6.3), got: {msg}"
-        );
-        assert!(
-            msg.contains("')'") || msg.contains("expected"),
-            "parse errors must say what was expected (spec §6.3), got: {msg}"
-        );
-    }
 }

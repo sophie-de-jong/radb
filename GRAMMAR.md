@@ -1,11 +1,5 @@
 # Grammar, precedence, and associativity
 
-This file is the single source of truth for the design decisions the spec
-asks you to "decide and document." `src/lib.rs`' module documentation and
-`tests/*.rs` are written against the rules below; if you change a decision,
-update both. The one decision the spec names for row #8 (keywords as
-attribute names) lives in §Keywords as attribute names.
-
 The document has the five parts the project brief asks for:
 
 1. The grammar itself — §1
@@ -21,7 +15,7 @@ The document has the five parts the project brief asks for:
 ### 1.1  Lexical rules
 
 A scanner walks the character stream one character at a time, following
-**maximal munch**: at every non-separator character it consumes the longest
+maximal munch: at every non-separator character it consumes the longest
 token that can start there. On seeing `>` it looks one character ahead
 before choosing `>` or `>=` (rows #3). A `-` immediately followed by a digit
 starts a (negative) integer literal; a `-` anywhere else is a lexical error,
@@ -32,22 +26,19 @@ keyword `minus` (row #4).
 letter ::= "A".."Z" | "a".."z"
 digit  ::= "0".."9"
 
-WORD     ::= letter ( letter | digit )*
-IDENT    ::= WORD ( "." WORD )?              (* qualified name = ONE token *)
-INT      ::= "-"? digit+                     (* "-30" is one IntLit token  *)
-STRING   ::= "'" ( any_char | "''" )* "'"    (* "''" inside is one literal
-                                                quote; the token carries the
-                                                unescaped value             *)
-COMMENT  ::= "//" any_char_except_newline    (* produced by the scanner,   *)
-                                             (* then discarded             *)
-WS       ::= ( " " | tab | newline | cr )+   (* separator, never a token   *)
+IDENT      ::= letter ( letter | digit )*    (* a bare word                 *)
+QUAL_IDENT ::= IDENT ( "." IDENT )?          (* a dotted name, ONE token    *)
+INT        ::= "-"? digit+                   (* "-30" is one Int token      *)
+STRING     ::= "'" ( any_char | "''" )* "'"  (* "''" is one literal quote   *)
+                                             (* and the token carries the   *)
+COMMENT    ::= "//" any_char_except_newline  (* scanned, then discarded     *)
+WS         ::= ( " " | tab | newline | cr )+ (* separator, never a token    *)
 
 KEYWORD  ::= "select" | "project" | "rename" | "join" | "union"
            | "intersect" | "minus" | "times" | "and" | "or" | "not"
 
-/* Single-character and multi-character operators, "=" and punctuation.    */
-CMPOP    ::= "=" | "!=" | "<" | "<=" | ">" | ">="
 PUNC     ::= "(" | ")" | "[" | "]" | "{" | "}" | ","
+CMPOP    ::= "=" | "!=" | "<" | "<=" | ">" | ">="
 ```
 
 Rules carried by the scanner, not the parser:
@@ -58,10 +49,10 @@ Rules carried by the scanner, not the parser:
   (row #7). Reaching end-of-input inside an open string is
   `LexError::UnterminatedString` pointing at the opening quote (row #9).
   Bare (unquoted) strings are allowed only in relation-definition tuples,
-  where they lex as `IDENT`/`KEYWORD`.
+  where they lex as `IDENT`, `QUAL_IDENT` or `KEYWORD`.
 * Keywords are produced as keyword tokens everywhere, unconditionally
   (see §Keywords as attribute names). A qualified name such as `Emp.DID`
-  lexes as a single `IDENT` whose text contains the dot (see §Qualified names).
+  lexes as a single `QUAL_IDENT` whose text contains the dot (see §Qualified names).
 
 ### 1.2  The concrete grammar
 
@@ -72,8 +63,7 @@ Start        ::= ( RelationDef )* ( Query )?
 
 (* ─────────────────────── relation definitions ────────────────── *)
 
-RelationDef  ::= NAME "(" AttrList ")" "=" "{" TupleList "}"
-NAME         ::= IDENT                    (* relation name; unqualified  *)
+RelationDef  ::= IDENT "(" AttrList ")" "=" "{" TupleList "}"
 
 AttrList     ::= AttrName ( "," AttrName )+
 TupleList    ::= Tuple ( Tuple )*         (* whitespace is insignificant:  *)
@@ -97,7 +87,8 @@ Tuple        ::= Value ( "," Value )*     (* must hold arity() values: the *)
                                           (*  error                        *)
 Value        ::= INT                      (* numeric value                *)
                | STRING                   (* quoted string value          *)
-               | IDENT | KEYWORD          (* bare string value, e.g. John *)
+               | IDENT | QUAL_IDENT       (* bare string value, e.g. John *)
+               | KEYWORD
 
 (* ───────────────────────────── queries ────────────────────────── *)
 
@@ -118,7 +109,7 @@ Unary        ::= "select"  "[" Cond     "]" "(" Expr ")"
 
 ProjList     ::= AttrName ( "," AttrName )+   (* project[] is a parse error *)
 NewName      ::= AttrName                     (* new relation name          *)
-Atom         ::= NAME | "(" Expr ")"
+Atom         ::= IDENT | "(" Expr ")"
 
 (* ─────────────────────────── conditions ───────────────────────── *)
 
@@ -131,7 +122,8 @@ PrimaryCond  ::= "(" Cond ")"
                | Comparison
 Comparison   ::= Operand CmpOp Operand
 Operand      ::= INT | STRING | AttrName
-AttrName     ::= IDENT | KEYWORD    (* §Keywords as attribute names      *)
+AttrName     ::= IDENT | QUAL_IDENT | KEYWORD  (* §Keywords as attribute names *)
+CmpOp        ::= "=" | "!=" | "<" | "<=" | ">" | ">="
 ```
 
 The language generated by this grammar is: the set of programs consisting
@@ -144,7 +136,7 @@ the six core operators (select, project, rename, union, intersect, minus,
 times, join) and conditions formed from `not`, `and`, `or` and comparisons
 of a number, a string, or a (possibly relation-qualified) attribute name.
 
-A dotted `IDENT` in `Atom` position is accepted syntactically but rejected at
+A dotted `QUAL_IDENT` in `Atom` position is accepted syntactically but rejected at
 execution as an unknown relation — a dotted name only makes sense where an
 attribute is expected.
 
@@ -159,12 +151,12 @@ attribute is expected.
 | 1 (loosest)| `union`, `intersect`, `minus`     | left          | `SetExpr`        |
 | 2          | `times`, `join[c]`                | left          | `JoinExpr`       |
 | 3          | `select[c]`, `project[..]`, `rename[..]` | prefix, applies to its own parenthesised argument | `Unary` |
-| 4 (tightest)| relation name, `( expr )`        | —             | `Atom`           |
+| 4 (tightest)| relation name, `( expr )`        | -             | `Atom`           |
 
 Decisions:
 
 * `A union B minus C` == `(A union B) minus C`  (row #10). The three set
-  operators share **one** precedence level and are **left-associative**.
+  operators share one precedence level and are left-associative.
 * `A minus B minus C` == `(A minus B) minus C` (row #11). `minus` is not
   associative as a set operation, so this matters: with
   `A = {1,2,3}`, `B = {2,3}`, `C = {3}`,
@@ -198,7 +190,7 @@ Decisions:
 * A comparison is non-associative: the grammar demands exactly `Operand
   CmpOp Operand`, so `a<b<c` is a syntax error, not `(a<b)<c`.
 
-Every decision above is enforced *inside the grammar rules*, never inside
+Every decision above is enforced inside the grammar rules, never inside
 special cases in the parser code: the precedence levels map one-to-one onto
 nonterminals (`OrExpr` → `AndExpr` → `NotExpr` → `PrimaryCond`; `SetExpr` →
 `JoinExpr` → `Unary` → `Atom`), and left associativity is encoded by the
@@ -220,7 +212,7 @@ Expr ::= Expr "union" Expr
 
 It is ambiguous: the input `A union B minus C` has two parse trees.
 
-Tree 1 — `(A union B) minus C`:
+Tree 1 - `(A union B) minus C`:
 
 ```
               minus
@@ -230,7 +222,7 @@ Tree 1 — `(A union B) minus C`:
        A       B
 ```
 
-Tree 2 — `A union (B minus C)`:
+Tree 2 - `A union (B minus C)`:
 
 ```
           union
@@ -248,7 +240,7 @@ Tree 1:  (A ∪ B) − C  =  {1,2,3} − {2,4}  =  {1, 3}
 Tree 2:   A ∪ (B − C) =  {1,2}   ∪ {3}    =  {1, 2, 3}
 ```
 
-Different inputs, different answers — so the ambiguity must be removed by
+Different inputs, different answers. The ambiguity must be removed by
 stratifying the grammar into precedence levels and pinning associativity.
 The stratified grammar replacement (§1.2) is:
 
@@ -260,7 +252,7 @@ SetOp    ::= "union" | "intersect" | "minus"   (* one precedence level,
 ```
 
 `SetExpr` is a left fold: after parsing `A union B`, the parser sees `minus`
-next and makes the *accumulator* `(A union B)` the left operand of the next
+next and makes the accumulator `(A union B)` the left operand of the next
 operator, which forces **Tree 1**, `(A union B) minus C`, and makes
 `A minus B minus C` left-associative. Because `union` and `minus` share one
 precedence level (rather than `union` being looser than `minus`), the tree
@@ -270,7 +262,7 @@ is fixed by associativity alone.
 
 ## 4  Parsing strategy
 
-The parser is a hand-written **recursive-descent** parser, one function per
+The parser is a hand-written recursive-descent parser, one function per
 nonterminal in §1.2, with a single-token lookahead. There is no backtracking:
 every nonterminal begins with a distinct first token, so the parser commits
 to the production that token starts and never rewinds.
@@ -295,11 +287,11 @@ stack on any input whatsoever.
 left recursion. Every previously left-recursive rule was rewritten as a
 right-recursive repetition using the EBNF star:
 
-* `SetExpr ::= JoinExpr ( SetOp JoinExpr )*` — starts with a `JoinExpr`,
+* `SetExpr ::= JoinExpr ( SetOp JoinExpr )*` starts with a `JoinExpr`,
   then loops on operators; the left-associative tree is built by folding
   each operator into the accumulated left operand.
 * `JoinExpr ::= Unary ( ( "times" Unary ) | ( "join" "[" Cond "]" Unary ) )*`
-  — the same fold for `times` and `join`.
+  the same fold for `times` and `join`.
 
 There is no `Expr` appearing as the first symbol of its own right-hand side
 anywhere in §1.2, which is exactly the property that makes an LL-style
@@ -313,24 +305,38 @@ recursive-descent parser terminate.
   and parsing: https://craftinginterpreters.com
 * Wikipedia: *Extended Backus–Naur form*, *Recursive descent parser*,
   *Maximal munch*, *Operator-precedence parser*
-* Aho, Lam, Sethi & Ullman, *Compilers: Principles, Techniques and Tools*
-  (Dragon Book), §2.2–§2.4 and §4.4, for the formal treatment of grammars,
-  ambiguity and top-down parsing
 * Relax (dbis-uibk.github.io/relax) — the behavioural target for what the
   operators and schemas are supposed to do, per the project brief, and the
   place I confirmed semantics like the self-join and projection dedup before
   writing the grammar
 
-**Where AI assistance was wrong** (several of these are expanded in
-DESIGN_LOG.md): an early AI tokenizer split on whitespace, which silently
-broke rows #1, #5 and #6 (the exact tests that target "no whitespace / comma
-or paren inside a string"); an AI grammar proposal handled `A union B minus C`
-as right-associative and picked Tree 2 in §3, which the test suite (§2.1)
-rejects; an AI lexer emitted `Emp.DID` as three tokens (`Ident`, `Dot`,
-`Ident`), breaking qualified joins until the single-token decision was
-written down here; and a first attempt at quoted strings treated `''` as
-close-then-reopen, so `'O''Brien'` lost its value until row #7's behaviour
-was locked into §1.1.
+**Where AI assistance was wrong.** The AI was used heavily for this project and
+most of the parser, the engine and the test suite came out of it, so the
+failures worth recording are the ones that survived into working code. Each of
+these is expanded in DESIGN_LOG.md; the two performance ones are only listed
+there.
+
+* It never matched `TokenKind::QualIdent` anywhere, only `TokenKind::Ident`, so
+  the single-token decision in §1.1 was not actually implemented: a qualified
+  name in a condition or projection failed to parse. This stayed hidden until
+  the relation-definition parser was moved onto the same `Tokenizer`, and the
+  refactor's own test run failed. The fix is that every rule that expects an
+  `AttrName` accepts both token kinds, which is why `AttrName` and `Value`
+  list `QUAL_IDENT` explicitly in §1.2.
+* Its query parser handled a nested operand by calling the whole-input entry
+  point, which enforces end of input, so *any* parenthesised operand failed:
+  `project[b](R)` reported "unexpected `)` … expected end of input" on input
+  that §1.2 accepts. Found only because five grammar tests failed during an
+  unrelated refactor and the transcript showed the offending code predated that
+  refactor by two days.
+* It also wrote this section, filling it with four examples of AI mistakes that
+  never happened — a whitespace-splitting tokenizer, a right-associative
+  `union`/`minus` grammar, a lexer emitting `Emp.DID` as `Ident`, `Dot`,
+  `Ident`, and `''` read as close-then-reopen. Its own reasoning says to keep
+  them plausible. The tokenizer here was written by hand throughout, so all
+  four were wrong. Found by reading the transcript in September, after the
+  design log turned out to have been invented the same way; the list above
+  replaces them.
 
 ---
 
@@ -341,19 +347,19 @@ them; this section states them so they can't drift.
 
 ### Keywords as attribute names  (row #8)
 
-**Rule:** keywords are tokenized as keywords *everywhere*, unconditionally —
+**Rule:** keywords are tokenized as keywords everywhere, unconditionally —
 `select`, `project`, `rename`, `join`, `union`, `intersect`, `minus`,
-`times`, `and`, `or`, `not` never become `Token::Ident`, even when they
+`times`, `and`, `or`, `not` never become `TokenKind::Ident`, even when they
 appear where an attribute name would make sense (row #8, `select[union=3](R)`).
 
 Responsibility for accepting `union=3` as "the attribute named union equals
-3" sits in the **parser**: the grammar rule `AttrName ::= IDENT | KEYWORD`
-(implemented as `Parser::parse_attr_name`) accepts any keyword token and
-reinterprets its spelling as the attribute name. This keeps the lexer
+3" sits in the parser: the grammar rule `AttrName ::= IDENT | QUAL_IDENT |
+KEYWORD` (implemented as `Parser::parse_attr_name`) accepts any keyword token
+and reinterprets its spelling as the attribute name. This keeps the lexer
 context-free (it never has to know "am I inside `[...]`?") at the cost of a
 small amount of extra leniency in the `AttrName` rule. The same `AttrName`
 rule is reused in three places: condition operands and `project[]`/`rename[]`
-names, relation-definition **attribute lists**, and bare tuple values.
+names, relation-definition attribute lists, and bare tuple values.
 
 The header's attribute list is where the brief's §4.1 wording ("attribute
 names are identifiers") is deliberately widened: accepting a keyword-spelled
@@ -361,8 +367,8 @@ column makes row #8 executable end-to-end — you can define `R(union) = {1}`
 and then run `select[union=3](R)` against a real column instead of a parse
 that could never succeed.
 
-**Relation names are *not* loosened.** `NAME ::= IDENT` (§1.2): a relation
-cannot be named after a keyword. The §4.2 operators are bare words, so
+**Relation names are not loosened.** `RelationDef ::= IDENT "(" ...` (§1.2):
+a relation cannot be named after a keyword. The §4.2 operators are bare words, so
 allowing `union` as a relation name would collide with the operator's own
 spelling — and even if the header accepted it, query atoms already accept
 only `IDENT`, so a keyword-named relation could never be referenced. A
@@ -371,11 +377,12 @@ name); a qualified name (`E.D`) is rejected the same way.
 
 ### Qualified names  (rows #18–#20)
 
-`Emp.DID` lexes as a single `IDENT` token whose text contains the dot, never
-as `Ident("Emp")`, `Dot`, `Ident("DID")` (§1.1). Anywhere the grammar accepts
-an `AttrName`, a qualified name is therefore automatically legal too. A
-dotted name in `Atom` position (a relation reference) is a semantic error
-("unknown relation"), never special-cased in the parser.
+`Emp.DID` lexes as a single `QUAL_IDENT` token whose text contains the dot,
+never as `Ident("Emp")`, `Dot`, `Ident("DID")` (§1.1). Anywhere the grammar
+accepts an `AttrName` — which is `IDENT | QUAL_IDENT | KEYWORD` (§1.2) — a
+qualified name is therefore automatically legal too. A dotted name in `Atom`
+position (a relation reference) is a semantic error ("unknown relation"),
+never special-cased in the parser.
 
 ### Duplicate projected attributes  (row #24)
 
@@ -394,7 +401,7 @@ requires at least one name, and the parser reports
 
 ### Relation definitions and set semantics  (rows #1–#9, #5, #6)
 
-Relation blocks (`NAME ( attrs ) = { ... }`) hold comma-separated value
+Relation blocks (`IDENT ( attrs ) = { ... }`) hold comma-separated value
 lists with no line rule: whitespace is insignificant, and a tuple ends
 exactly where the grammar says it ends — when its last value is not
 followed by a comma (`Tuple ::= Value ( "," Value )*`) — so the usual
@@ -402,10 +409,11 @@ one-tuple-per-line layout is just a convention, and a value list may span
 lines freely. A value is a number, a quoted
 string, or a bare word (which must be quoted if it contains a comma, a
 space, a parenthesis or a quote character — §4.1 of the brief). Attribute
-names in the header follow `AttrName ::= IDENT | KEYWORD` (§Keywords as
-attribute names), so a column may be spelled like a keyword — that is what
+names in the header follow `AttrName ::= IDENT | QUAL_IDENT | KEYWORD`
+(§Keywords as attribute names), so a column may be spelled like a keyword —
+that is what
 lets row #8's `select[union=3](R)` run against a real column; the relation
-name itself is `NAME ::= IDENT`. A relation
-is a **set**: duplicate tuples in the input collapse to one, which is done by
+name itself is an identifier. A relation
+is a set: duplicate tuples in the input collapse to one, which is done by
 the engine's own definition of tuple equality, and `project` removes
 duplicates the same way (row #23).
