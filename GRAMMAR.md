@@ -26,13 +26,12 @@ keyword `minus` (row #4).
 letter ::= "A".."Z" | "a".."z"
 digit  ::= "0".."9"
 
-IDENT      ::= letter ( letter | digit )*    (* a bare word                 *)
-QUAL_IDENT ::= IDENT ( "." IDENT )?          (* a dotted name, ONE token    *)
+IDENT      ::= letter ( letter | digit )*    (* bare word                   *)
+QUAL_IDENT ::= IDENT ( "." IDENT )?          (* dotted name, one token      *)
 INT        ::= "-"? digit+                   (* "-30" is one Int token      *)
-STRING     ::= "'" ( any_char | "''" )* "'"  (* "''" is one literal quote   *)
-                                             (* and the token carries the   *)
-COMMENT    ::= "//" any_char_except_newline  (* scanned, then discarded     *)
-WS         ::= ( " " | tab | newline | cr )+ (* separator, never a token    *)
+STRING     ::= "'" ( any_char | "''" )* "'"  (* '' is one literal quote     *)
+COMMENT    ::= "//" any_char_except_newline  (* discarded by the scanner    *)
+WS         ::= ( " " | tab | newline | cr )+ (* ignored between tokens      *)
 
 KEYWORD  ::= "select" | "project" | "rename" | "join" | "union"
            | "intersect" | "minus" | "times" | "and" | "or" | "not"
@@ -49,7 +48,16 @@ Rules carried by the scanner, not the parser:
   (row #7). Reaching end-of-input inside an open string is
   `LexError::UnterminatedString` pointing at the opening quote (row #9).
   Bare (unquoted) strings are allowed only in relation-definition tuples,
-  where they lex as `IDENT`, `QUAL_IDENT` or `KEYWORD`.
+  where they lex as `IDENT`, `QUAL_IDENT` or `KEYWORD`. §4.1 also requires
+  a bare value to be quoted if it contains a comma, a space, a parenthesis
+  or a quote character, and the scanner enforces that without a separate
+  check: a bare value is exactly one `IDENT` / `QUAL_IDENT` / `KEYWORD`
+  token, and each of those four characters ends one. The consequence is
+  therefore grammatical rather than an error — in a tuple body
+  `Hello World` is two bare values, and since a tuple ends where its last
+  value is not followed by a comma, it is two tuples rather than one value
+  containing a space. Quoting is the only way to get the space into the
+  value.
 * Keywords are produced as keyword tokens everywhere, unconditionally
   (see §Keywords as attribute names). A qualified name such as `Emp.DID`
   lexes as a single `QUAL_IDENT` whose text contains the dot (see §Qualified names).
@@ -65,26 +73,14 @@ Start        ::= ( RelationDef )* ( Query )?
 
 RelationDef  ::= IDENT "(" AttrList ")" "=" "{" TupleList "}"
 
-AttrList     ::= AttrName ( "," AttrName )+
-TupleList    ::= Tuple ( Tuple )*         (* whitespace is insignificant:  *)
-                                          (*  a tuple ends when its last   *)
-                                          (*  value is not followed by a   *)
-                                          (*  comma, so tuples need not    *)
-                                          (*  each start on a new line;    *)
-                                          (*  blank lines and // comments  *)
-                                          (*  are ignored                  *)
-Tuple        ::= Value ( "," Value )*     (* must hold arity() values: the *)
-                                          (*  caller pushes each tuple into*)
-                                          (*  the Relation after parsing   *)
-                                          (*  it (Relation::push), so      *)
-                                          (*  arity and per-column type    *)
-                                          (*  mixing are enforced while the*)
-                                          (*  relation is being loaded; a  *)
-                                          (*  column has no declared type, *)
-                                          (*  so its type is the one its   *)
-                                          (*  values share — int or str —  *)
-                                          (*  and mixing is a load-time    *)
-                                          (*  error                        *)
+AttrList     ::= BareAttrName ( "," BareAttrName )+
+                                          (* at least one name             *)
+                                          (* and never a dotted one        *)
+BareAttrName ::= IDENT | KEYWORD          (* §Keywords as attribute names  *)
+TupleList    ::= Tuple ( Tuple )*         (* whitespace is insignificant;  *)
+                                          (*  // comments are ignored      *)
+Tuple        ::= Value ( "," Value )*     (* one value per attribute; a    *)
+                                          (*  mismatch is a load-time error *)
 Value        ::= INT                      (* numeric value                *)
                | STRING                   (* quoted string value          *)
                | IDENT | QUAL_IDENT       (* bare string value, e.g. John *)
@@ -138,7 +134,9 @@ of a number, a string, or a (possibly relation-qualified) attribute name.
 
 A dotted `QUAL_IDENT` in `Atom` position is accepted syntactically but rejected at
 execution as an unknown relation — a dotted name only makes sense where an
-attribute is expected.
+attribute is expected. A dotted name in a relation *header* is rejected at
+parse time, because it could never be referred to afterwards (§Qualified
+names).
 
 ---
 
@@ -247,8 +245,7 @@ The stratified grammar replacement (§1.2) is:
 ```
 Expr     ::= SetExpr
 SetExpr  ::= JoinExpr ( SetOp JoinExpr )*
-SetOp    ::= "union" | "intersect" | "minus"   (* one precedence level,
-                                                  left-associative *)
+SetOp    ::= "union" | "intersect" | "minus"  (* one level, left-associative *)
 ```
 
 `SetExpr` is a left fold: after parsing `A union B`, the parser sees `minus`
@@ -350,15 +347,18 @@ Responsibility for accepting `union=3` as "the attribute named union equals
 KEYWORD` (implemented as `Parser::parse_attr_name`) accepts any keyword token
 and reinterprets its spelling as the attribute name. This keeps the lexer
 context-free (it never has to know "am I inside `[...]`?") at the cost of a
-small amount of extra leniency in the `AttrName` rule. The same `AttrName`
-rule is reused in three places: condition operands and `project[]`/`rename[]`
-names, relation-definition attribute lists, and bare tuple values.
+small amount of extra leniency in the `AttrName` rule. `AttrName` is reused
+in condition operands, `project[]`/`rename[]` names and bare tuple values;
+relation-definition attribute lists use the narrower `BareAttrName`, which
+drops `QUAL_IDENT` (see §Qualified names) but keeps keywords.
 
 The header's attribute list is where the brief's §4.1 wording ("attribute
-names are identifiers") is deliberately widened: accepting a keyword-spelled
-column makes row #8 executable end-to-end — you can define `R(union) = {1}`
-and then run `select[union=3](R)` against a real column instead of a parse
-that could never succeed.
+names are identifiers") is deliberately widened, in exactly one direction:
+accepting a keyword-spelled column makes row #8 executable end-to-end — you
+can define `R(union) = {1}` and then run `select[union=3](R)` against a real
+column instead of a parse that could never succeed. Nothing else is added. In
+particular `QUAL_IDENT` is *removed* from the header, which is a narrowing
+back towards §4.1 rather than away from it.
 
 **Relation names are not loosened.** `RelationDef ::= IDENT "(" ...` (§1.2):
 a relation cannot be named after a keyword. The §4.2 operators are bare words, so
@@ -376,6 +376,29 @@ accepts an `AttrName` — which is `IDENT | QUAL_IDENT | KEYWORD` (§1.2) — a
 qualified name is therefore automatically legal too. A dotted name in `Atom`
 position (a relation reference) is a semantic error ("unknown relation"),
 never special-cased in the parser.
+
+**A qualified name has exactly one period, and a name with two can never be
+written.** `QUAL_IDENT ::= IDENT ( "." IDENT )?` allows one dot, so maximal
+munch cannot lex `Q.D.Name`: it produces `QUAL_IDENT("Q.D")`, then `.`, then
+`IDENT("Name")`, which no rule accepts. This is why a relation *header* takes
+`BareAttrName ::= IDENT | KEYWORD` and not `AttrName` (§4.1 of the brief:
+"Attribute names are identifiers").
+
+Rejecting `Q(D.Name, Age)` is not just deference to the brief — the column
+would be unusable. §4.3 has `times` and `join` prefix every attribute with
+its relation name, so `D.Name` in relation `Q` becomes `Q.D.Name`, and that
+is a name no query can mention. The column could be printed in a result
+schema and then never selected on, projected, compared or joined. The parser
+reports `ParseError::QualifiedAttributeName` at the name
+(`tests/2_grammar.rs::test_18_*`).
+
+One consequence is worth stating because it looks like a special case and is
+not: a column whose name equals its relation's, `K(K)`, comes out of a `times`
+or `join` as `K.K` like any other attribute. Leaving it bare would be the
+only way to keep it one period, and then the only spelling available for it
+in a condition is `K` — indistinguishable from the relation name. Qualifying
+it is both what §4.3 says and what makes it addressable
+(`tests/3_semantics.rs::test_26_*`).
 
 ### Duplicate projected attributes  (row #24)
 
@@ -402,11 +425,12 @@ one-tuple-per-line layout is just a convention, and a value list may span
 lines freely. A value is a number, a quoted
 string, or a bare word (which must be quoted if it contains a comma, a
 space, a parenthesis or a quote character — §4.1 of the brief). Attribute
-names in the header follow `AttrName ::= IDENT | QUAL_IDENT | KEYWORD`
+names in the header follow `BareAttrName ::= IDENT | KEYWORD`
 (§Keywords as attribute names), so a column may be spelled like a keyword —
 that is what
 lets row #8's `select[union=3](R)` run against a real column; the relation
-name itself is an identifier. A relation
+name itself is an identifier. A header name is never qualified — see
+§Qualified names for why a dotted one would be unreachable. A relation
 is a set: duplicate tuples in the input collapse to one, which is done by
 the engine's own definition of tuple equality, and `project` removes
 duplicates the same way (row #23).

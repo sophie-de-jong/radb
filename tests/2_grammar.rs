@@ -43,20 +43,20 @@ fn test_11b_left_grouping_gives_different_answer() {
     use radb::{Engine, Relation, Value};
 
     let mut eng = Engine::new();
-    let mut a = Relation::new(["x"]);
+    let mut a = Relation::new(["x"]).expect("test header names are distinct");
     for v in [1, 2, 3] {
-        a.push([Value::Int(v)])
+        a.insert([Value::Int(v)])
             .expect("static test data is well-formed");
     }
     eng.load("A", a);
-    let mut b = Relation::new(["x"]);
+    let mut b = Relation::new(["x"]).expect("test header names are distinct");
     for v in [2, 3] {
-        b.push([Value::Int(v)])
+        b.insert([Value::Int(v)])
             .expect("static test data is well-formed");
     }
     eng.load("B", b);
-    let mut c = Relation::new(["x"]);
-    c.push([Value::Int(3)])
+    let mut c = Relation::new(["x"]).expect("test header names are distinct");
+    c.insert([Value::Int(3)])
         .expect("static test data is well-formed");
     eng.load("C", c);
 

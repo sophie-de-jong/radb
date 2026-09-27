@@ -73,6 +73,10 @@ enum Command {
     },
 }
 
+/// The `write` subcommand: generate R.txt and S.txt at the requested sizes.
+///
+/// Errors: an [`io::Error`] if the requested S cannot be generated or a file
+/// cannot be written.
 fn write(n: usize, m: usize, matches: f64, seed: u64) -> io::Result<()> {
     let (r, s) = generate_relations(n, m, matches, seed)
         .map_err(|msg| io::Error::new(io::ErrorKind::InvalidInput, msg))?;
@@ -82,10 +86,13 @@ fn write(n: usize, m: usize, matches: f64, seed: u64) -> io::Result<()> {
     Ok(())
 }
 
+/// Write `rel` to `<name>.txt` in the §4.1 relation-definition syntax.
+///
+/// Errors: an [`io::Error`] from creating or writing the file.
 fn write_relation_file(rel: &Relation, name: &str) -> io::Result<()> {
     let path = PathBuf::from(format!("{name}.txt"));
     let mut f = fs::File::create(&path)?;
-    writeln!(f, "{name}({}) = {{", rel.schema().join(", "))?;
+    writeln!(f, "{name}({}) = {{", rel.schema().names().join(", "))?;
     for row in rel.iter() {
         let vals: Vec<String> = row.iter().map(|v| v.to_string()).collect();
         writeln!(f, "  {}", vals.join(", "))?;
@@ -93,6 +100,9 @@ fn write_relation_file(rel: &Relation, name: &str) -> io::Result<()> {
     writeln!(f, "}}")
 }
 
+/// The `study` subcommand: time the §8.3 join at each size, then select and
+/// project at the same sizes (§8.4 q3). The §8.3 join table goes to stdout;
+/// progress and the per-size select and project figures go to stderr.
 fn study(sizes: Vec<usize>, matches: f64, seed: u64) {
     let join_q = parse_query("R join[R.b=S.b] S").expect("join query should parse");
     let project_q = parse_query("project[b](R)").expect("project query should parse");
@@ -114,7 +124,8 @@ fn study(sizes: Vec<usize>, matches: f64, seed: u64) {
         eng.load("R", r);
         eng.load("S", s);
 
-        // Threshold scaled per size, like the old per-size select expression.
+        // Threshold scaled to the size, so each selection keeps about half its
+        // tuples.
         let select_q =
             parse_query(&format!("select[a>={}](R)", n / 2)).expect("select query should parse");
 
@@ -146,6 +157,7 @@ fn study(sizes: Vec<usize>, matches: f64, seed: u64) {
     print_table(&headers, &table_rows);
 }
 
+/// Print a Markdown table with these `headers` and `rows`.
 fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     let widths: Vec<usize> = (0..headers.len())
         .map(|c| {
@@ -176,10 +188,11 @@ fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     }
 }
 
-/// Generates R(a, b) and S(b, c) for the §8.1 experiment setup.
+/// R(a, b) and S(b, c) for the §8.1 experiment, sized so that each R tuple
+/// joins with about `expected_matches` S tuples on average.
 ///
-/// The b-domain is chosen so that each R row matches approximately
-/// `expected_matches` rows of S on average: domain ≈ m / expected.
+/// Errors: a message when `m` distinct S tuples cannot be drawn at that match
+/// rate, i.e. when the (b, c) value space is smaller than `m`.
 pub fn generate_relations(
     n: usize,
     m: usize,
@@ -194,9 +207,7 @@ pub fn generate_relations(
         ((m as f64 / expected_matches).ceil() as i64).max(1)
     };
 
-    // S is a set of (b, c) pairs; the loop below draws until it has collected
-    // m distinct ones. If the (b, c) space (b-domain × c-range) is smaller
-    // than m, that can never finish. Prefer fail upfront instead of spinning.
+    // S must be a set, so m distinct (b, c) pairs have to exist.
     let c_range: i64 = 1_000_000;
     let space = domain.saturating_mul(c_range);
     if m as i64 > space {
@@ -224,26 +235,29 @@ pub fn generate_relations(
         }
     }
 
-    let mut r = Relation::new(["a", "b"]);
+    let mut r = Relation::new(["a", "b"]).expect("generated header names are distinct");
     for row in r_rows {
-        r.push(row).expect("generated rows are well-formed");
+        r.insert(row).expect("generated rows are well-formed");
     }
-    let mut s = Relation::new(["b", "c"]);
+    let mut s = Relation::new(["b", "c"]).expect("generated header names are distinct");
     for row in s_rows {
-        s.push(row).expect("generated rows are well-formed");
+        s.insert(row).expect("generated rows are well-formed");
     }
     Ok((r, s))
 }
 
-/// Small deterministic PRNG (xorshift64*), so runs are reproducible for a
-/// given seed.
+/// A small deterministic PRNG (xorshift64*), so a run is reproducible from its
+/// seed.
 pub struct Rng(u64);
 
 impl Rng {
+    /// A generator seeded with `seed`; 0 is treated as 1, which is a fixed
+    /// point of the generator.
     pub fn new(seed: u64) -> Self {
         Rng(seed.max(1))
     }
 
+    /// The next pseudo-random `u64`.
     pub fn next_u64(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x << 13;
@@ -253,6 +267,7 @@ impl Rng {
         x.wrapping_mul(0x2545F4914F6CDD1D)
     }
 
+    /// A pseudo-random value in `lo..hi_exclusive`.
     pub fn next_range(&mut self, lo: i64, hi_exclusive: i64) -> i64 {
         debug_assert!(hi_exclusive > lo);
         let span = (hi_exclusive - lo) as u64;
@@ -260,6 +275,9 @@ impl Rng {
     }
 }
 
+/// Run the subcommand given on the command line.
+///
+/// Errors: whatever the `write` subcommand reports.
 fn main() -> io::Result<()> {
     let args = Args::parse();
     match args.command {
@@ -287,6 +305,7 @@ mod test {
 
     const SEED: u64 = 1028;
 
+    /// The generator produces exactly the requested tuple counts and headers.
     #[test]
     fn generates_the_requested_tuple_counts() {
         let (r, s) = generate_relations(100, 50, 2.0, SEED).unwrap();
@@ -297,6 +316,8 @@ mod test {
         assert!(r.iter().all(|row| row.len() == 2));
     }
 
+    /// The match rate picks the b-domain, so the join really does produce
+    /// about `n × matches` tuples.
     #[test]
     fn b_domain_is_chosen_from_the_match_rate() {
         // m = 1000, expected 10 matches per tuple → b-domain ≈ 100.
@@ -318,6 +339,7 @@ mod test {
         );
     }
 
+    /// Generated relations reload through the §4.1 syntax unchanged.
     #[test]
     fn generated_relations_roundtrip_through_the_relation_format() {
         let (r, _s) = generate_relations(20, 20, 3.0, SEED).unwrap();
@@ -337,10 +359,10 @@ mod test {
         assert!(loaded.iter().all(|row| r.contains(row)));
     }
 
+    /// S holds no duplicate tuple, so it stays a set of the requested size
+    /// even when n is much larger than the b-domain.
     #[test]
     fn duplicate_b_pairs_are_excluded_from_s() {
-        // S is built with uniqueness on (b, c), so it stays a set even when n
-        // is much larger than the b-domain.
         let (_, s) = generate_relations(1, 1000, 2.0, SEED).unwrap();
         assert_eq!(s.len(), 1000);
         let mut seen = std::collections::HashSet::new();
@@ -349,6 +371,7 @@ mod test {
         }
     }
 
+    /// Generated relations load into the engine and answer a query.
     #[test]
     fn relations_are_usable_by_the_engine() {
         let (r, s) = generate_relations(10, 10, 1.0, SEED).unwrap();

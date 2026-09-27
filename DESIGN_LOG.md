@@ -77,25 +77,53 @@ Went through the specs against the project and found four real gaps: no
 git commit at all (§9 wants a link), README commands naming a `ra` binary that
 had been renamed two days earlier and a `data/` directory that never existed,
 REPORT.md stating the log–log slope with no plot, and a `union-or-minus-etc.`
-placeholder that AI had generated in GRAMMAR.md §3's ambiguity demonstration. Fixed all four; the plot is a stdlib-only Python script writing a two-panel SVG. Committed the repository's first commit.
+placeholder that AI had generated in GRAMMAR.md §3's ambiguity demonstration. 
+Fixed all four; the plot is a stdlib-only Python script writing a two-panel SVG. Committed the repository's first commit.
 
 ## 2026-09-26, session 1 — spec revision, re-measurement, docs pass
 
-Worked on this one alone, no AI. I renamed `Stats::selection_examinations` to
-`select_comparisons`, moved the select and project progress lines to stderr,
-and left stdout carrying only the §8.3 join table. I re-ran the sweep and
-pasted the binary's own output into REPORT.md, which moved the 64k join from
-42.960 s to 30.627 s and q4's estimate from about 2.9 hours to about 2. Broke
-the §4.1 and §6.3 error coverage: taking the inline documentation and the ~20
-unit tests out of `src/parser.rs` left `ParseError::MustQuote` and
-`EmptyValue` unreachable. The docs had drifted from the code, README
-still listed the deleted parser tests and a second stdout table, and the
-log–log plot was still drawn from the old numbers. Fixed all of it, redrew
-the plot from the new table, refitted the slope to 2.03, and moved the plot
-generator into the repository as `tools/plot_loglog.py` on matplotlib (the
-brief allows a plotting library for the report), because the only previous
-copy lived in a scratch directory and I had already lost it once — which is
-how the figure came to disagree with the table in the first place.
+Worked on this one alone, no AI. Renamed `Stats::selection_examinations` to
+`select_comparisons` and moved the select and project progress lines to stderr,
+so stdout carries only the §8.3 join table. Re-ran the sweep and pasted the
+binary's own output into REPORT.md: 64k join 42.960 s → 30.627 s, q4's estimate
+about 2.9 hours → about 2. Broke the §4.1 and §6.3 error coverage on the way —
+taking the inline docs and ~20 unit tests out of `src/parser.rs` left
+`MustQuote` and `EmptyValue` unreachable. Fixed that, the stale README and the
+plot, which was still drawn from the old numbers; refitted the slope to 2.03
+and committed the generator as `plot_loglog.py`.
+
+## 2026-09-26, session 2 — the relation learns its own name
+
+Working through the engine to be able to explain all of it, I got stuck on how
+`times` and `join` knew which relation name to qualify their inputs with. The
+answer was `qualifier_of`, an AST walk re-deriving what the value already knew;
+it is now a `qualifier` field on `Relation`, set in `Engine::load`. Moving
+`qualify` inside the two operators took the duplicate check with it, and that
+check is unnecessary whenever the relation names differ.
+
+## 2026-09-27, session 1 — doc comments, and the EBNF comments with them
+
+Asked for a doc comment on every function under `src`, private helpers and test
+functions included, and the same for the EBNF comment blocks in GRAMMAR.md. Kept
+the §4.2 and §4.3 cross-references and cut the ones that explained the
+mechanism.
+
+## 2026-09-27, session 2 — the join compiles from the two inputs
+
+Refactored the engine on my own: `Schema::headers` to `names`, `Value::scalar`
+to `Value::matches`, the join condition compiled against the two input schemas
+instead of the joined one, and one `check_duplicates` for every schema. Broke on
+my side: 12 tests, because a join condition names the output's columns while an
+input's own schema holds bare ones, and one `check_duplicates` reporting
+`SchemaMismatch` left `DuplicateColumn` unconstructible.
+
+Fixed by resolving each operand against the name its input would have in the
+output, through the `qualify_name` that already writes §4.3's rule down, so the
+names searched are the joined names. `join` then needs no schema argument,
+builds its output once, and the base index is gone. `DuplicateColumn` is for a
+header written wrong, with a wrapper at the two §4.3 collision sites. 52
+queries against the previous commit, `HashSet` order normalised, differ only as
+intended. 49 tests.
 
 ## Where the AI was wrong
 

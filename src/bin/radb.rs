@@ -32,24 +32,27 @@ struct Args {
     query: Vec<String>,
 }
 
-/// A failure message. A failed `main` is reported by the runtime as
-/// `Error: <message>` (spec §6.3), which uses the error's `Debug` form —
-/// so `Debug` prints the message itself, never a stack trace.
+/// A failure message. A failed `main` is reported as `Error: <message>`, which
+/// uses the `Debug` form, so `Debug` prints the message and never a stack
+/// trace.
 struct AppError(String);
 
 impl AppError {
+    /// An error carrying `message`.
     fn new(message: impl Into<String>) -> Self {
         AppError(message.into())
     }
 }
 
 impl fmt::Display for AppError {
+    /// Renders the message.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
 impl fmt::Debug for AppError {
+    /// Renders the message, so a failed `main` prints no stack trace.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
@@ -58,17 +61,24 @@ impl fmt::Debug for AppError {
 impl std::error::Error for AppError {}
 
 impl From<ParseError> for AppError {
+    /// Carries the parse error's message.
     fn from(err: ParseError) -> Self {
         AppError(err.to_string())
     }
 }
 
 impl From<SemanticError> for AppError {
+    /// Carries the semantic error's message.
     fn from(err: SemanticError) -> Self {
         AppError(err.to_string())
     }
 }
 
+/// Print the parse tree of QUERY with `--tree`, otherwise load the given
+/// relation files and run QUERY against them.
+///
+/// Errors: [`AppError`] carrying the message of the first failure — a missing
+/// query, an unreadable file, or a parse or semantic error.
 fn main() -> Result<(), AppError> {
     let args = Args::parse();
     if args.query.is_empty() {

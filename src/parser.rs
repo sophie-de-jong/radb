@@ -1,22 +1,22 @@
 //! Parser, abstract syntax tree and parse-tree rendering.
 //!
-//! The parser is a hand-written recursive-descent parser that owns a
-//! [`Tokenizer`] and pulls tokens from it lazily. It implements the grammar
-//! documented in GRAMMAR.md; in particular, precedence is stratified into
-//! levels (`SetExpr` → `JoinExpr` → `Unary`, and `OrExpr` → `AndExpr` →
-//! `NotExpr` → `PrimaryCond`), which is what makes the grammar unambiguous.
+//! A hand-written recursive-descent parser that owns a [`Tokenizer`] and pulls
+//! tokens from it lazily, one method per nonterminal of GRAMMAR.md §1.2. The
+//! grammar's precedence levels are the method levels: `SetExpr` → `JoinExpr` →
+//! `Unary` → `Atom` and `OrExpr` → `AndExpr` → `NotExpr` → `PrimaryCond`, each
+//! looping on its operators to fold them into the already-parsed left side.
 //!
-//! It also parses §4.1 relation definitions (`NAME ( attrs ) = { ... }`)
-//! — see [`Parser::parse_relation_def`] and [`parse_relation`].
+//! It also parses §4.1 relation definitions (`NAME ( attrs ) = { ... }`) — see
+//! [`Parser::parse_relation_def`] and [`parse_relation`].
 //!
-//! Per GRAMMAR.md §"Keywords as attribute names", the parser — not the
-//! lexer — accepts a keyword token wherever the grammar expects an attribute
-//! name (see [`Parser::parse_attr_name`]).
+//! Per GRAMMAR.md §"Keywords as attribute names", a keyword token is accepted
+//! wherever the grammar expects an attribute name (see
+//! [`Parser::parse_attr_name`]).
 
 use std::error::Error as StdError;
 use std::fmt;
 
-use crate::engine::RowError;
+use crate::engine::{RowError, SemanticError};
 use crate::tokenizer::{Keyword, LexError, Position, Token, TokenKind, Tokenizer};
 use crate::Relation;
 use crate::Value;
@@ -27,6 +27,7 @@ use crate::Value;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParseError {
+    /// A lexical error, reported unchanged.
     Lex(LexError),
     /// Ran out of input while a construct was still open (e.g. a missing `)`).
     UnexpectedEof {
@@ -43,29 +44,33 @@ pub enum ParseError {
     EmptyProjectionList {
         at: Position,
     },
-    /// A blank/comment-only input contains no relation definition: no
-    /// `NAME` ever appears.
+    /// Blank or comment-only input: no relation definition was given.
     MissingHeader,
-    /// Two attributes in one header have the same name; `at` is the second
-    /// occurrence.
+    /// Two attributes in one header share a name; `at` is the header's `(`.
     DuplicateAttribute {
         name: String,
         at: Position,
     },
-    /// A tuple had more or fewer values than the relation has attributes.
-    /// `Relation::push` enforces §1.2's arity rule after the parser reads
-    /// the tuple, so this error points at the tuple's starting position.
+    /// The header is well-formed but does not make a relation.
+    InvalidRelation {
+        detail: String,
+        at: Position,
+    },
+    /// A header used a qualified attribute name, `Q(D.Name)`; see GRAMMAR.md
+    /// §"Qualified names".
+    QualifiedAttributeName {
+        name: String,
+        at: Position,
+    },
+    /// A tuple has more or fewer values than the relation has attributes;
+    /// `at` is the tuple's first value.
     ArityMismatch {
         at: Position,
         expected: usize,
         found: usize,
     },
-    /// A column holds values of more than one type (e.g. `R(x) = {1, 'a'}`).
-    /// A column's type is its values' type, so mixing is a load-time error:
-    /// `Relation::push` refuses the tuple and this error names the column,
-    /// the two types, and the position of the tuple that carried the
-    /// offending value (its starting position). Both types are "int" or
-    /// "str".
+    /// A column holds values of two types, e.g. `R(x) = {1, 'a'}`; `expected`
+    /// and `found` are `"int"` or `"str"`, and `at` is the offending tuple.
     ColumnTypeMismatch {
         at: Position,
         name: String,
@@ -79,6 +84,7 @@ pub enum ParseError {
 }
 
 impl fmt::Display for ParseError {
+    /// Renders the error as a one-line message with its position.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ParseError::Lex(e) => write!(f, "{e}"),
@@ -98,6 +104,12 @@ impl fmt::Display for ParseError {
             }
             ParseError::DuplicateAttribute { name, at } => {
                 write!(f, "duplicate attribute '{name}' at {at} in relation header")
+            }
+            ParseError::InvalidRelation { detail, at } => {
+                write!(f, "cannot build the relation declared at {at}: {detail}")
+            }
+            ParseError::QualifiedAttributeName { name, at } => {
+                write!(f, "'{name}' at {at} cannot be an attribute name in a relation header: attribute names are identifiers (§4.1), and a qualified one could never be referred to")
             }
             ParseError::ArityMismatch {
                 at,
@@ -123,6 +135,7 @@ impl fmt::Display for ParseError {
 impl StdError for ParseError {}
 
 impl From<LexError> for ParseError {
+    /// A lexical error is a parse error whose position and wording stand.
     fn from(e: LexError) -> Self {
         ParseError::Lex(e)
     }
@@ -132,38 +145,48 @@ impl From<LexError> for ParseError {
 // AST
 // =====================================================================
 
+/// A parsed query: one node per operator, with its condition or children.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Query {
+    /// A reference to a loaded relation.
     Variable(String),
+    /// `select[cond](input)`.
     Select {
         predicate: Predicate,
         input: Box<Query>,
     },
+    /// `project[attrs](input)`.
     Project {
         attrs: Vec<String>,
         input: Box<Query>,
     },
+    /// `rename[name](input)`.
     Rename {
         new_name: String,
         input: Box<Query>,
     },
+    /// `left join[cond] right`.
     Join {
         condition: Predicate,
         left: Box<Query>,
         right: Box<Query>,
     },
+    /// `left union right`.
     Union {
         left: Box<Query>,
         right: Box<Query>,
     },
+    /// `left intersect right`.
     Intersect {
         left: Box<Query>,
         right: Box<Query>,
     },
+    /// `left minus right`.
     Minus {
         left: Box<Query>,
         right: Box<Query>,
     },
+    /// `left times right`.
     Times {
         left: Box<Query>,
         right: Box<Query>,
@@ -171,6 +194,7 @@ pub enum Query {
 }
 
 impl fmt::Display for Query {
+    /// Renders the query as an indented parse tree, one node per line.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let children = match self {
             Query::Variable(name) => {
@@ -232,19 +256,25 @@ impl fmt::Display for Query {
     }
 }
 
+/// A condition: one comparison, combined with `and`, `or` and `not`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Predicate {
+    /// `left op right`.
     Compare {
         left: Operand,
         op: CompareOp,
         right: Operand,
     },
+    /// Both operands must hold.
     And(Box<Predicate>, Box<Predicate>),
+    /// Either operand must hold.
     Or(Box<Predicate>, Box<Predicate>),
+    /// The operand must not hold.
     Not(Box<Predicate>),
 }
 
 impl fmt::Display for Predicate {
+    /// Renders the condition in the `Op(...)` form used in parse trees.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Predicate::Compare { left, op, right } => write!(f, "{op:?}({left}, {right})"),
@@ -255,14 +285,19 @@ impl fmt::Display for Predicate {
     }
 }
 
+/// One side of a comparison: an attribute, an integer or a string.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operand {
+    /// An attribute name, possibly qualified as `Rel.Attr`.
     Attr(String),
+    /// An integer literal.
     Num(i64),
+    /// A string literal.
     Str(String),
 }
 
 impl fmt::Display for Operand {
+    /// Renders the operand with its kind, e.g. `Attr(Age)` or `Str('x')`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Operand::Attr(name) => write!(f, "Attr({name})"),
@@ -272,6 +307,7 @@ impl fmt::Display for Operand {
     }
 }
 
+/// The six comparison operators of GRAMMAR.md §1.2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompareOp {
     Eq,
@@ -286,31 +322,43 @@ pub enum CompareOp {
 // Parser
 // =====================================================================
 
+/// A recursive-descent parser over a [`Tokenizer`], with one method per
+/// nonterminal of GRAMMAR.md §1.2 and a single token of lookahead.
 pub struct Parser<'a> {
     tokenizer: Tokenizer<'a>,
     current: Token,
 }
 
 impl<'a> Parser<'a> {
+    /// A parser for `input`, with the first token already read.
+    ///
+    /// Errors: a [`LexError`] in the first token.
     pub fn new(input: &'a str) -> Result<Self, ParseError> {
         let mut tokenizer = Tokenizer::new(input);
         let current = tokenizer.next_token()?;
         Ok(Parser { tokenizer, current })
     }
 
+    /// The position of the current token in the input.
     fn at(&self) -> Position {
         Position::new(self.tokenizer.input(), self.current.at)
     }
 
+    /// The kind of the current token.
     fn peek(&self) -> &TokenKind {
         &self.current.kind
     }
 
+    /// Consume the current token and read the next one.
+    ///
+    /// Errors: a [`LexError`] in the next token.
     fn advance(&mut self) -> Result<(), ParseError> {
         self.current = self.tokenizer.next_token()?;
         Ok(())
     }
 
+    /// Consume the current token if it is `kind`, else report that `what` was
+    /// expected there.
     fn expect(&mut self, kind: &TokenKind, what: &str) -> Result<(), ParseError> {
         if self.peek() == kind {
             self.advance()
@@ -319,6 +367,8 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// A parse error for the current token naming `expected` as what belonged
+    /// there; end of input gives [`ParseError::UnexpectedEof`].
     fn unexpected(&self, expected: &str) -> ParseError {
         match self.peek() {
             TokenKind::Eof => ParseError::UnexpectedEof {
@@ -334,19 +384,32 @@ impl<'a> Parser<'a> {
     }
 
     /// RelationDef ::= NAME "(" AttrList ")" "=" "{" TupleList "}"
+    ///
+    /// Errors: any [`ParseError`] in the definition, plus
+    /// [`ParseError::MissingHeader`] for blank or comment-only input.
     pub fn parse_relation_def(&mut self) -> Result<(String, Relation), ParseError> {
-        // Blank/comment-only input never produces a token at all.
         if matches!(self.peek(), TokenKind::Eof) {
             return Err(ParseError::MissingHeader);
         }
 
         let name = self.parse_name()?; // NAME
         self.expect(&TokenKind::LParen, "'(' after relation name")?;
+        // Kept as the position to blame if the header turns out to be invalid.
+        let header_at = self.at();
         let schema = self.parse_attr_list()?; // AttrList
         self.expect(&TokenKind::RParen, "')' after attribute list")?;
         self.expect(&TokenKind::Eq, "'='")?;
         self.expect(&TokenKind::LBrace, "'{'")?;
-        let mut relation = Relation::new(schema);
+        let mut relation = Relation::new(schema).map_err(|error| match error {
+            SemanticError::DuplicateColumn { name } => ParseError::DuplicateAttribute {
+                name,
+                at: header_at,
+            },
+            other => ParseError::InvalidRelation {
+                detail: other.to_string(),
+                at: header_at,
+            },
+        })?;
         self.parse_tuple_list(&mut relation)?; // TupleList
         self.expect(&TokenKind::RBrace, "'}' after the tuples")?;
 
@@ -368,19 +431,31 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// AttrList ::= AttrName ( "," AttrName )+
+    /// AttrList ::= BareAttrName ( "," BareAttrName )+
+    ///
+    /// A repeated name is not rejected here: it is left to [`Relation::new`].
     fn parse_attr_list(&mut self) -> Result<Vec<String>, ParseError> {
-        let mut attrs = vec![self.parse_attr_name()?];
+        let mut attrs = vec![self.parse_bare_attr_name()?];
         while matches!(self.peek(), TokenKind::Comma) {
             self.advance()?;
-            let at = self.at();
-            let name = self.parse_attr_name()?;
-            if attrs.contains(&name) {
-                return Err(ParseError::DuplicateAttribute { name, at });
-            }
-            attrs.push(name);
+            attrs.push(self.parse_bare_attr_name()?);
         }
         Ok(attrs)
+    }
+
+    /// BareAttrName ::= IDENT | KEYWORD
+    ///
+    /// A qualified name is refused here: GRAMMAR.md §"Qualified names" gives
+    /// the reason, and [`ParseError::QualifiedAttributeName`] the report.
+    fn parse_bare_attr_name(&mut self) -> Result<String, ParseError> {
+        let at = self.at();
+        if let TokenKind::QualIdent(name) = self.peek() {
+            return Err(ParseError::QualifiedAttributeName {
+                name: name.clone(),
+                at,
+            });
+        }
+        self.parse_attr_name()
     }
 
     /// Tuple ::= Value ( "," Value )*
@@ -407,9 +482,9 @@ impl<'a> Parser<'a> {
 
     /// TupleList ::= Tuple ( Tuple )*
     ///
-    /// Stops at the closing `}` (left unconsumed for
-    /// [`Parser::parse_relation_def`]) and reports a missing `}` at end of
-    /// input.
+    /// Tuples are added to `relation` as they are read, so a tuple of the
+    /// wrong arity or with a mixed-type column is reported here. The closing
+    /// `}` is left for [`Parser::parse_relation_def`].
     fn parse_tuple_list(&mut self, relation: &mut Relation) -> Result<(), ParseError> {
         while !matches!(self.peek(), TokenKind::RBrace) {
             if matches!(self.peek(), TokenKind::Eof) {
@@ -417,7 +492,7 @@ impl<'a> Parser<'a> {
             }
             let at = self.at();
             let values = self.parse_tuple()?;
-            match relation.push(values) {
+            match relation.insert(values) {
                 Ok(_) => (),
                 Err(RowError::Arity { expected, found }) => {
                     return Err(ParseError::ArityMismatch {
@@ -445,6 +520,8 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a whole query: a [`Query`] followed by end of input.
+    ///
+    /// Errors: any [`ParseError`], including trailing input after the query.
     pub fn parse_query(&mut self) -> Result<Query, ParseError> {
         let query = self.parse_set_expr()?;
         if !matches!(self.peek(), TokenKind::Eof) {
@@ -453,7 +530,8 @@ impl<'a> Parser<'a> {
         Ok(query)
     }
 
-    /// SetExpr ::= JoinExpr ( SetOp JoinExpr )*
+    /// SetExpr ::= JoinExpr ( SetOp JoinExpr )* — one precedence level,
+    /// left-associative (GRAMMAR.md §2.1).
     fn parse_set_expr(&mut self) -> Result<Query, ParseError> {
         let mut left = self.parse_join_expr()?;
         loop {
@@ -488,7 +566,9 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// JoinExpr ::= Unary ( ( "times" Unary ) | ( "join" "[" Cond "]" Unary ) )*
+    /// JoinExpr ::= Unary ( ( "times" Unary )
+    ///                     | ( "join" "[" Cond "]" Unary ) )*
+    /// — tighter than the set operators, left-associative.
     fn parse_join_expr(&mut self) -> Result<Query, ParseError> {
         let mut left = self.parse_unary()?;
         loop {
@@ -591,7 +671,8 @@ impl<'a> Parser<'a> {
         self.parse_or()
     }
 
-    /// OrExpr ::= AndExpr ( "or" AndExpr )*
+    /// OrExpr ::= AndExpr ( "or" AndExpr )* — loosest condition level,
+    /// left-associative.
     fn parse_or(&mut self) -> Result<Predicate, ParseError> {
         let mut left = self.parse_and()?;
         while matches!(self.peek(), TokenKind::Keyword(Keyword::Or)) {
@@ -602,7 +683,8 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// AndExpr ::= NotExpr ( "and" NotExpr )*
+    /// AndExpr ::= NotExpr ( "and" NotExpr )* — binds tighter than `or`,
+    /// left-associative.
     fn parse_and(&mut self) -> Result<Predicate, ParseError> {
         let mut left = self.parse_not()?;
         while matches!(self.peek(), TokenKind::Keyword(Keyword::And)) {
@@ -613,7 +695,8 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    /// NotExpr ::= "not" NotExpr | PrimaryCond
+    /// NotExpr ::= "not" NotExpr | PrimaryCond — prefix, binds tighter than
+    /// `and`.
     fn parse_not(&mut self) -> Result<Predicate, ParseError> {
         if matches!(self.peek(), TokenKind::Keyword(Keyword::Not)) {
             self.advance()?;
@@ -636,7 +719,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Comparison ::= Operand CmpOp Operand
+    /// Comparison ::= Operand CmpOp Operand — non-associative, so `a<b<c` is
+    /// a syntax error.
     fn parse_comparison(&mut self) -> Result<Predicate, ParseError> {
         let left = self.parse_operand()?;
         let op = match self.peek() {
@@ -681,6 +765,10 @@ impl<'a> Parser<'a> {
     }
 
     /// AttrName ::= IDENT | KEYWORD
+    ///
+    /// A keyword token is accepted as an attribute name here, which is what
+    /// makes `select[union=3](R)` run against a real column (GRAMMAR.md
+    /// §"Keywords as attribute names").
     fn parse_attr_name(&mut self) -> Result<String, ParseError> {
         let name = match self.peek() {
             TokenKind::Ident(s) | TokenKind::QualIdent(s) => s.clone(),
@@ -693,13 +781,79 @@ impl<'a> Parser<'a> {
 }
 
 /// Parse a whole query string into its abstract syntax tree.
+///
+/// Errors: any [`ParseError`], including a [`LexError`] in the first token.
 pub fn parse_query(input: &str) -> Result<Query, ParseError> {
     let mut parser = Parser::new(input)?;
     parser.parse_query()
 }
 
-/// Parse a whole relation definition into its header name and relation.
+/// Parse a whole §4.1 relation definition into its header name and relation.
+///
+/// Errors: any [`ParseError`] in the definition.
 pub fn parse_relation(input: &str) -> Result<(String, Relation), ParseError> {
     let mut parser = Parser::new(input)?;
     parser.parse_relation_def()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::*;
+
+    #[test]
+    fn dotted_header_attribute_is_rejected() {
+        // §4.1: "Attribute names are identifiers." A dotted one is unusable —
+        // a times or join would prefix the relation name to give `Q.D.Name`,
+        // which the tokenizer never lexes back, so the column could be printed
+        // but never selected on, projected or joined.
+        let err = parse_relation("Q(D.Name, Age) = {\n'Ann', 30\n}").unwrap_err();
+        match err {
+            ParseError::QualifiedAttributeName { ref name, .. } => {
+                assert_eq!(name, "D.Name", "the error should name the offending attribute");
+            }
+            other => panic!("expected QualifiedAttributeName, got {other:#?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains("identifier") && msg.contains("D.Name"),
+            "error message should explain the rule and name the attribute, got: {msg}"
+        );
+
+        // A bare identifier header is still fine, including a keyword as a name
+        // (row #8) and a column that happens to match its relation name.
+        assert!(parse_relation("Q(DName, Age) = {\n'Ann', 30\n}").is_ok());
+        assert!(parse_relation("R(union, x) = {\n3, 1\n}").is_ok());
+        assert!(parse_relation("K(K) = {\n1\n}").is_ok());
+    }
+
+    #[test]
+    fn repeated_header_attribute_is_rejected_with_a_position() {
+        // The repetition is `Relation::new`'s to notice, not the parser's: that is
+        // the single place a hand-written header list is checked, so a header that
+        // repeats a name is refused the same way whether it came from a file or
+        // from a caller. The parser's job here is only to supply a position.
+        let err = parse_relation("R(a, b, a) = {\n1, 2, 3\n}").unwrap_err();
+        match err {
+            ParseError::DuplicateAttribute { ref name, at } => {
+                assert_eq!(name, "a", "the error should name the repeated attribute");
+                assert_eq!(at.line, 1, "the header is on the first line");
+                assert!(
+                    at.col > 0,
+                    "the position should point into the header, got {at}"
+                );
+            }
+            other => panic!("expected DuplicateAttribute, got {other:#?}"),
+        }
+
+        // The message has to stand on its own, since it is what a user sees.
+        let msg = parse_relation("R(a, a) = {\n1, 2\n}").unwrap_err().to_string();
+        assert!(
+            msg.contains("duplicate attribute 'a'") && msg.contains("line 1"),
+            "error message should name the attribute and the line, got: {msg}"
+        );
+
+        // Distinct names, including one equal to the relation name (row #26 in
+        // 3_semantics.rs) and a keyword used as a name (row #8), are all fine.
+        assert!(parse_relation("R(a, b) = {\n1, 2\n}").is_ok());
+    }
 }

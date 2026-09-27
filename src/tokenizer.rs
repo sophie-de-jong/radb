@@ -1,16 +1,13 @@
 //! Tokenizer for the radb query language.
 //!
-//! Two design decisions from GRAMMAR.md are baked into the lexer:
+//! Two lexical rules from GRAMMAR.md §1.1:
 //!
-//! 1. Qualified names (`Emp.DID`) are lexed as a *single*
-//!    [`TokenKind::QualIdent`] containing a dot, not as three tokens. This
-//!    keeps the grammar simple: anywhere an `Ident` is expected, a qualified
-//!    name is also legal.
-//! 2. Words that are also keywords (`union`, `and`, ...) always tokenize as
-//!    their keyword token, even in a position where an attribute name would
-//!    make sense (e.g. `select[union=3](R)`). The *parser* — not the lexer —
-//!    is responsible for accepting a keyword token as an attribute name
-//!    wherever the grammar expects one (see `Parser::parse_attr_name` and
+//! 1. A qualified name (`Emp.DID`) is one [`TokenKind::QualIdent`] token
+//!    containing the dot, so anywhere an `Ident` is expected a qualified name
+//!    is legal too.
+//! 2. A reserved word (`union`, `and`, ...) is always a keyword token, even
+//!    where an attribute name would make sense (`select[union=3](R)`).
+//!    Accepting it as an attribute name is the parser's job (see
 //!    GRAMMAR.md §"Keywords as attribute names").
 
 use std::error::Error as StdError;
@@ -22,16 +19,18 @@ use std::str::{CharIndices, FromStr};
 // Positions
 // =====================================================================
 
+/// A place in the input: 1-based line, 0-based column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Position {
+    /// The 1-based line number.
     pub line: usize,
+    /// The 0-based column within `line`.
     pub col: usize,
 }
 
 impl Position {
-    /// Convert a byte offset into a (line, column) pair. Columns are
-    /// 0-based within the line. Never panics: positions past the end of the
-    /// input (e.g. the end-of-input token) are clamped.
+    /// The position of the byte offset `position` in `input`. Offsets past
+    /// the end of the input (the end-of-input token) clamp to its length.
     pub fn new(input: &str, position: usize) -> Self {
         let position = position.min(input.len());
         let mut line = 1;
@@ -53,6 +52,7 @@ impl Position {
 }
 
 impl fmt::Display for Position {
+    /// Renders as `line L, col C`, the form used in error messages.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "line {}, col {}", self.line, self.col)
     }
@@ -64,16 +64,17 @@ impl fmt::Display for Position {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LexError {
-    /// A string literal was opened with `'` but never closed.
-    /// `at` should point at the opening quote.
+    /// A string literal was opened with `'` but never closed; `at` is the
+    /// opening quote.
     UnterminatedString { at: Position },
     /// A character that cannot start any token.
     UnexpectedChar { ch: char, at: Position },
-    /// Integer overflow.
+    /// An integer literal too large to hold in an `i64`.
     IntegerOverflow { at: Position },
 }
 
 impl fmt::Display for LexError {
+    /// Renders the error as a one-line message with its position.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LexError::UnterminatedString { at } => {
@@ -92,6 +93,7 @@ impl StdError for LexError {}
 // Tokens
 // =====================================================================
 
+/// The reserved words of the query language.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Keyword {
     Select,
@@ -107,11 +109,13 @@ pub enum Keyword {
     Not,
 }
 
+/// Returned by [`Keyword::from_str`] for a word that is not reserved.
 pub struct KeywordError;
 
 impl FromStr for Keyword {
     type Err = KeywordError;
 
+    /// The keyword `s` spells, or `KeywordError` if `s` is not one.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "select" => Ok(Keyword::Select),
@@ -131,6 +135,7 @@ impl FromStr for Keyword {
 }
 
 impl fmt::Display for Keyword {
+    /// Renders the keyword as it is spelled in a query.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Keyword::Select => write!(f, "select"),
@@ -148,6 +153,7 @@ impl fmt::Display for Keyword {
     }
 }
 
+/// The kind of a token; the kinds that carry a value hold it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     Ident(String),
@@ -175,7 +181,7 @@ pub enum TokenKind {
 }
 
 impl TokenKind {
-    /// Human-readable description of a token for error messages.
+    /// A short description of the token, for parser error messages.
     pub(crate) fn describe(&self) -> String {
         match self {
             TokenKind::QualIdent(s) => format!("identifier '{s}'"),
@@ -203,7 +209,9 @@ impl TokenKind {
 
 /// A token kind plus the byte offset in the input where it started.
 pub struct Token {
+    /// What kind of token this is.
     pub kind: TokenKind,
+    /// The byte offset in the input where the token starts.
     pub at: usize,
 }
 
@@ -224,6 +232,7 @@ pub struct Tokenizer<'a> {
 }
 
 impl<'a> Tokenizer<'a> {
+    /// A tokenizer that has scanned nothing of `input` yet.
     pub fn new(input: &'a str) -> Self {
         Tokenizer {
             input,
@@ -236,8 +245,12 @@ impl<'a> Tokenizer<'a> {
         self.input
     }
 
-    /// Produce the next token. Once the input is exhausted this always
-    /// returns the end-of-input token (positioned at the end of the input).
+    /// The next token, skipping whitespace and `//` comments. Once the input
+    /// is exhausted this keeps returning the end-of-input token, positioned at
+    /// the end of the input.
+    ///
+    /// Errors: an unterminated string, an integer literal too large for an
+    /// `i64`, or a character that starts no token.
     pub fn next_token(&mut self) -> Result<Token, LexError> {
         while let Some((at, c)) = self.chars.next() {
             let kind = match c {
@@ -376,7 +389,9 @@ impl<'a> Tokenizer<'a> {
     }
 }
 
-/// Tokenize the whole input up to and including the end-of-input token.
+/// Every token in `input`, up to and including the end-of-input token.
+///
+/// Errors: the first [`LexError`] the scanner reports.
 pub fn tokenize(input: &str) -> Result<Vec<TokenKind>, LexError> {
     let mut tokenizer = Tokenizer::new(input);
     let mut tokens = Vec::new();
@@ -395,8 +410,8 @@ pub fn tokenize(input: &str) -> Result<Vec<TokenKind>, LexError> {
 mod tests {
     use super::*;
 
-    /// `'abc` starts with an unterminated string at byte 0. This used to panic
-    /// in the lexer (`at - 1` underflowed); it must be a clean LexError.
+    /// An unterminated string opening at offset 0 is a clean [`LexError`],
+    /// not a panic (spec row #9).
     #[test]
     fn unterminated_string_at_position_zero_is_clean_error() {
         let err = tokenize("'abc").unwrap_err();

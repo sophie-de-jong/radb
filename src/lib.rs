@@ -7,8 +7,9 @@
 //! - `parser` — parse errors, the AST, the `Parser` (which owns a
 //!   `Tokenizer`), §4.1 relation-definition parsing, and parse-tree
 //!   rendering;
-//! - `engine` — values, the `Row`/`Relation` types, and the `Engine` that
-//!   evaluates an AST bottom-up;
+//! - `engine` — values, the `Row`/`Schema`/`Relation` types, the compiled
+//!   `SelectCond`/`JoinCond` condition types, and the `Engine` that evaluates
+//!   an AST bottom-up;
 //! - the §8.1 performance-study data generator lives in the `radb-study`
 //!   binary (`src/bin/radb_study.rs`).
 //!
@@ -20,7 +21,9 @@ mod engine;
 mod parser;
 mod tokenizer;
 
-pub use engine::{Engine, Relation, Row, RowError, SemanticError, Stats, Value};
+pub use engine::{
+    Engine, Relation, Row, RowError, Schema, SemanticError, Stats, Value,
+};
 
 pub use parser::{
     parse_query, parse_relation, CompareOp, Operand, ParseError, Parser, Predicate, Query,

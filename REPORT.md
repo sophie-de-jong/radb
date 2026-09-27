@@ -13,18 +13,27 @@ condition is evaluated on. Both are exact counts read back out of the
 instrumented engine, not estimates. Match rate is 5 (each R tuple matches
 ~5 S tuples on average).
 
-One implementation note: join conditions are resolved once per query into a
-condition tree, and the tree is then evaluated per pair through borrowed
-operands — a column comparison reads both values by reference, and a string
-constant lives in the tree and is borrowed, never cloned. So the condition
-evaluator allocates and clones nothing, for any condition shape (the
-study's lone `R.b=S.b`, `and`/`or`/`not`, constants, same-side columns).
-Operators are compiled at resolve time too: the six grammar comparisons
-reduce to a three-way `Ordering` "want" plus (for `>=`, `<=`, `!=`) a
-not-flag, so the inner loop never sees the operator. This is a
-constant-factor optimization only: it is still a nested loop that examines
-every (left, right) pair and counts each one exactly once, so the
-comparison counts are exactly n × m.
+One implementation note: conditions are resolved once per query into a
+condition tree, and the tree is then evaluated per tuple (for `select`) or per
+pair (for `join`) through borrowed operands — a column comparison reads both
+values by reference, and a string constant lives in the tree and is borrowed,
+never cloned. So the condition evaluator allocates and clones nothing, for any
+condition shape (the study's lone `R.b=S.b`, `and`/`or`/`not`, constants,
+same-side columns). Operators are compiled at resolve time too: the six grammar
+comparisons reduce to a three-way `Ordering` "want" plus (for `>=`, `<=`,
+`!=`) a not-flag, so the inner loop never sees the operator.
+
+`select` and `join` conditions are two separate types rather than one type
+with a mode flag, because the two operators genuinely differ: a `select` tests
+a single tuple, so its leaves are bare column indices, while a `join` pairs two
+tuples, so every column leaf records which side it reads. That is resolved once
+and baked into the leaf, so the inner loop indexes one row or the other
+directly — no base offset to compare or subtract per column read, and no merged
+schema carried into evaluation. The two types share their boolean structure
+(`and`/`or`/`not`, the `cmp`-and-test shape) through a generic, so nothing is
+duplicated for it. This is a constant-factor optimization only: the join is
+still a nested loop that examines every (left, right) pair and counts each one
+exactly once, so the comparison counts are exactly n × m.
 
 Each size in the sweep is timed once, so the absolute wall times carry
 roughly ±30% run-to-run depending on what else the machine is doing; the
@@ -80,17 +89,17 @@ measured slope of 2.034 is very close to the theoretical value of 2.0,
 confirming that the nested-loop join scales as the product of the two
 relation sizes.
 
-![Two-panel log–log plot of the measurements](report_loglog.png)
+![Log–log plot of join, select and project against n](report_loglog.png)
 
-Both panels are drawn by `tools/plot_loglog.py` from the tables in this
-document, so the figure cannot drift from the numbers:
+The figure is drawn by `plot_loglog.py` from the tables in this document, so
+it cannot drift from the numbers:
 
-    uv run --with matplotlib tools/plot_loglog.py
+    uv run --with matplotlib plot_loglog.py
 
 The script prints the least-squares fit it drew, which is where the 2.034
-above comes from. In the right panel, select and project coincide at n = 1000
-and n = 2000 because both are at the 0.0001 s floor of the printed precision;
-their markers use different shapes so neither is hidden behind the other.
+above comes from. Select and project coincide at n = 1000 and n = 2000
+because both are at the 0.0001 s floor of the printed precision; their
+markers use different shapes so neither is hidden behind the other.
 
 ### 3. Select and project at the same sizes
 
@@ -109,7 +118,7 @@ confirms `select_comparisons = n`), so their curves are linear in n,
 not quadratic.  On log-log axes their slopes are 1.10 and 1.07, compared to
 the join's 2.03.  The select is essentially free: it walks the n tuples,
 evaluates a single comparison per tuple, and copies the matching rows
-(right panel of the figure above: select and project both rise with
+(the figure above: select and project both rise with
 slope ≈ 1, against the join's ≈ 2). The project adds the cost of
 hashing each projected row for deduplication,
 which is also linear but with a larger constant factor (hash allocation,
@@ -117,8 +126,6 @@ HashSet insert).  Both are thousands of times faster than the join at
 large sizes because they never nest an inner loop.
 
 ### 4. Predicted time for n = 1,000,000
-
-Two independent routes to the same answer.
 
 Scaling the largest measured point, which assumes the O(n²) the slope
 supports:
@@ -128,15 +135,7 @@ supports:
     15.625²                 = 244 times more time
     30.627 × 244            = 7,477 s ≈ 2.1 hours
 
-Extrapolating the fitted line from question 2 instead, at n = 10⁶:
-
-    log10(time) = -8.28 + 2.034 × 6 = 3.92
-    time = 10^3.92 ≈ 8,300 s ≈ 2.3 hours
-
-The two land about 11% apart, which is the size of the timing spread on a
-single run, so the answer is ≈ 2–2.5 hours for the million-tuple join.  Both
-routes assume the per-pair cost stays flat, which the measured ns-per-pair
-column above supports.
+The answer is ≈ 2 hours for the million-tuple join.
 
 ### 5. Does changing the match rate change comparisons or wall time?
 
@@ -172,9 +171,4 @@ to sub-quadratic.  The two main approaches are a sort-merge join and
 a hash join.  A hash join builds a hash table on the smaller
 relation's join attribute (O(m) time and space), then probes it for each
 tuple of the larger relation (O(n) time), for a total of O(n + m) expected
-time.  With m = 10⁶ the hash table requires ~16 GB of RAM (a few bytes
-per bucket), which is within reach of modern servers.  A sort-merge join
-sorts both relations (O(n log n + m log m)) then merges in a single pass,
-trading memory for deterministic behaviour.  Both require O(m) working
-memory for the hash table or sort buffer, which is the fundamental cost
-that the nested-loop design avoids.
+time. A sort-merge join sorts both relations (O(n log n + m log m)) then merges in a single pass, trading memory for deterministic behaviour.  Both require O(m) working memory for the hash table or sort buffer, which is the fundamental cost that the nested-loop design avoids.

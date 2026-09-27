@@ -36,7 +36,7 @@ cargo test
 `tests/` holds exactly the §7 rows. The
 additional tests live next to the code as unit tests:
 
-- `src/engine.rs` — `Relation::push` checks, set-op type edge cases, and
+- `src/engine.rs` — `Relation::insert` checks, set-op type edge cases, and
   the §8.2 instrumentation counters
 - `src/tokenizer.rs` — lexer edge cases
 - `src/bin/radb_study.rs` — §8.1 data-generator tests
@@ -94,3 +94,8 @@ expressed.
 - Relation names must be identifiers; a relation named after a keyword
   (e.g. `union`) cannot be referenced. Attribute names can be keywords —
   see GRAMMAR.md, "Keywords as attribute names".
+- A relation *header* attribute name cannot be qualified: `Q(D.Name, Age)` is
+  a parse error. A qualified name has exactly one period, so a `times` or
+  `join` on such a column would produce `Q.D.Name`, which no query could
+  mention — the column would exist in a result schema and be unusable
+  everywhere else. See GRAMMAR.md, "Qualified names".
