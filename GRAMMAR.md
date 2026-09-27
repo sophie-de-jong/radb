@@ -312,9 +312,10 @@ recursive-descent parser terminate.
 
 **Where AI assistance was wrong.** The AI was used heavily for this project and
 most of the parser, the engine and the test suite came out of it, so the
-failures worth recording are the ones that survived into working code. Each of
-these is expanded in DESIGN_LOG.md; the two performance ones are only listed
-there.
+failures worth recording are the ones that survived into working code. Both of
+the parsing failures below are expanded in DESIGN_LOG.md's closing section,
+which also lists the failures that aren't about parsing — the two performance
+ones appear only there.
 
 * It never matched `TokenKind::QualIdent` anywhere, only `TokenKind::Ident`, so
   the single-token decision in §1.1 was not actually implemented: a qualified
@@ -324,19 +325,11 @@ there.
   `AttrName` accepts both token kinds, which is why `AttrName` and `Value`
   list `QUAL_IDENT` explicitly in §1.2.
 * Its query parser handled a nested operand by calling the whole-input entry
-  point, which enforces end of input, so *any* parenthesised operand failed:
-  `project[b](R)` reported "unexpected `)` … expected end of input" on input
+  point, which enforces end of input, so any parenthesised operand failed:
+  `project[b](R)` reported "unexpected `)` ... expected end of input" on input
   that §1.2 accepts. Found only because five grammar tests failed during an
   unrelated refactor and the transcript showed the offending code predated that
   refactor by two days.
-* It also wrote this section, filling it with four examples of AI mistakes that
-  never happened — a whitespace-splitting tokenizer, a right-associative
-  `union`/`minus` grammar, a lexer emitting `Emp.DID` as `Ident`, `Dot`,
-  `Ident`, and `''` read as close-then-reopen. Its own reasoning says to keep
-  them plausible. The tokenizer here was written by hand throughout, so all
-  four were wrong. Found by reading the transcript in September, after the
-  design log turned out to have been invented the same way; the list above
-  replaces them.
 
 ---
 

@@ -73,17 +73,24 @@ the condition short-circuits.
 Plotting wall time against n on log-log axes and fitting a line by least
 squares over the seven points yields
 
-    log10(time) = -8.28 + 2.034 * log10(n)
+    log10(time) = -8.28 + 2.034*log10(n)
 
-A slope of 2.0 indicates O(n²) growth: doubling n quadruples the time.  The
+A slope of 2.0 indicates O(n²) growth: doubling n quadruples the time. The
 measured slope of 2.034 is very close to the theoretical value of 2.0,
 confirming that the nested-loop join scales as the product of the two
-relation sizes.  The excess is measurement noise — a 3% deviation in the
-exponent is what a ±30% timing spread on the largest sizes produces — and
-not a second complexity hiding in the code, since the per-pair cost is
-flat (§ above).
+relation sizes.
 
-![Two-panel log–log plot of the measurements](report_loglog.svg)
+![Two-panel log–log plot of the measurements](report_loglog.png)
+
+Both panels are drawn by `tools/plot_loglog.py` from the tables in this
+document, so the figure cannot drift from the numbers:
+
+    uv run --with matplotlib tools/plot_loglog.py
+
+The script prints the least-squares fit it drew, which is where the 2.034
+above comes from. In the right panel, select and project coincide at n = 1000
+and n = 2000 because both are at the 0.0001 s floor of the printed precision;
+their markers use different shapes so neither is hidden behind the other.
 
 ### 3. Select and project at the same sizes
 

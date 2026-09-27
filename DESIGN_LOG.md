@@ -88,10 +88,14 @@ pasted the binary's own output into REPORT.md, which moved the 64k join from
 42.960 s to 30.627 s and q4's estimate from about 2.9 hours to about 2. Broke
 the §4.1 and §6.3 error coverage: taking the inline documentation and the ~20
 unit tests out of `src/parser.rs` left `ParseError::MustQuote` and
-`EmptyValue` unreachable, and the docs had drifted from the code — README
+`EmptyValue` unreachable. The docs had drifted from the code, README
 still listed the deleted parser tests and a second stdout table, and the
 log–log plot was still drawn from the old numbers. Fixed all of it, redrew
-the plot from the new table, and refitted the slope to 2.03.
+the plot from the new table, refitted the slope to 2.03, and moved the plot
+generator into the repository as `tools/plot_loglog.py` on matplotlib (the
+brief allows a plotting library for the report), because the only previous
+copy lived in a scratch directory and I had already lost it once — which is
+how the figure came to disagree with the table in the first place.
 
 ## Where the AI was wrong
 
