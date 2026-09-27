@@ -4,50 +4,6 @@
 **Language:** Rust 1.97.1
 **Binary:** `cargo run --release --bin radb-study -- study`
 
-All timing is wall-clock time of the `Engine::execute` call only (data
-generation and relation loading excluded). §8.2 asks for one counter per
-operator, and there are exactly two: `Stats::join_comparisons`, incremented
-once for every pair of tuples the join condition is evaluated on, and
-`Stats::select_comparisons`, incremented once for every tuple the selection
-condition is evaluated on. Both are exact counts read back out of the
-instrumented engine, not estimates. Match rate is 5 (each R tuple matches
-~5 S tuples on average).
-
-One implementation note: conditions are resolved once per query into a
-condition tree, and the tree is then evaluated per tuple (for `select`) or per
-pair (for `join`) through borrowed operands — a column comparison reads both
-values by reference, and a string constant lives in the tree and is borrowed,
-never cloned. So the condition evaluator allocates and clones nothing, for any
-condition shape (the study's lone `R.b=S.b`, `and`/`or`/`not`, constants,
-same-side columns). Operators are compiled at resolve time too: the six grammar
-comparisons reduce to a three-way `Ordering` "want" plus (for `>=`, `<=`,
-`!=`) a not-flag, so the inner loop never sees the operator.
-
-`select` and `join` conditions are two separate types rather than one type
-with a mode flag, because the two operators genuinely differ: a `select` tests
-a single tuple, so its leaves are bare column indices, while a `join` pairs two
-tuples, so every column leaf records which side it reads. That is resolved once
-and baked into the leaf, so the inner loop indexes one row or the other
-directly — no base offset to compare or subtract per column read, and no merged
-schema carried into evaluation. The two types share their boolean structure
-(`and`/`or`/`not`, the `cmp`-and-test shape) through a generic, so nothing is
-duplicated for it. This is a constant-factor optimization only: the join is
-still a nested loop that examines every (left, right) pair and counts each one
-exactly once, so the comparison counts are exactly n × m.
-
-Each size in the sweep is timed once, so the absolute wall times carry
-roughly ±30% run-to-run depending on what else the machine is doing; the
-per-pair cost is the stable quantity. Dividing each row of the join table
-by its comparison count gives 7.0, 6.3, 6.6, 7.3, 7.3, 7.5 and 7.5 ns per
-pair from n = 1000 to n = 64000 — essentially flat, which is what makes
-the O(n²) extrapolation in question 4 safe. An earlier run of the same
-binary on a heavily loaded machine (about 2 GB of swap in use) gave 42.960 s
-for the 64k join, or 10.5 ns per pair; the numbers below are from a later,
-idle run of the identical command. Nothing but the constant changed: the
-original clone-based interpreter cost about 27 ns per pair, so the
-optimization is worth roughly 3.5× per comparison, and 109 s became 31 s at
-n = 64000.
-
 ## 8.3  Join table
 
 Generated with `radb-study study --sizes 1000,2000,4000,8000,16000,32000,64000 --matches 5 --seed 7`.
