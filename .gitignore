@@ -1,4 +1,7 @@
 /target
+/bench/data
+/db
 R.txt
 S.txt
 INSTRUCTIONS.txt
+__pycache__/

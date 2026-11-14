@@ -1,101 +1,149 @@
 # radb
 
-A small relational-algebra query engine in Rust. See `GRAMMAR.md` for the
-tokenization, precedence, and associativity rules the parser follows.
+A database system in Rust, built one module at a time (Project 2). Each module
+is defined by its own contract and runs through its own command-line tool; the
+last binary wires all four together.
 
-## Running a query
+## Modules
+
+- **Module 1 — storage engine** (`radb-storage`, `src/storage/`): 4096-byte
+  pages, a slotted data-page layout, heap files of directory and data pages, a
+  buffer pool with LRU and CLOCK, and a `catalog.db`.
+- **Module 2 — execution engine** (`radb-exec`, `src/exec/`): a pull-based
+  iterator model over physical plans, external sort, three join algorithms, and
+  a single memory budget `B`.
+- **Module 3 — SQL front end** (`radb-sql`, `src/sql/`): a hand-written scanner
+  and parser, name resolution, type and aggregate checking, and translation to
+  a logical plan. It never chooses a physical algorithm and never moves a
+  predicate.
+- **Module 4 — optimizer** (`radb-opt`, `src/optimize/`): catalog statistics,
+  selectivity and cost estimation, logical rewrites, dynamic-programming join
+  ordering, and conversion to the physical plan Module 2 consumes.
+- **Integration** (`radb`, `src/bin/radb/`): a shell around `Database` with the
+  SQL subset plus `EXPLAIN`, `EXPLAIN ANALYZE`, `ANALYZE TABLE`, `SET frames`,
+  and `LOAD TABLE ... FROM`. `Database` also owns the shared bulk loader.
+
+The shared core types are `src/schema.rs` (`Schema`, `Column`, `ColumnType`,
+`SemanticError`), `src/value.rs` (`Value`, `Row`), and `src/csv.rs` (the bulk
+loader's CSV reader). A logical plan carries typed `Condition` trees; their
+JSON form is the condition string M2 and M4 share.
+
+## Building and testing
 
 ```
-cargo run --bin radb -- --tree "project[Name](select[Age>30](Employees))"
-```
-
-prints the parse tree for a query without executing it:
-
-```
-Project(attrs=[Name])
-└── Select(cond=Gt(Attr(Age), Num(30)))
-    └── Relation(Employees)
-```
-
-To actually execute a query, load relation files first.
-
-```
-cargo run --bin radb -- -r R.txt -r S.txt "R join[R.b=S.b] S"
-```
-
-## Running the tests
-
-```
+cargo build --release
 cargo test
+cargo clippy --all-targets -- -D warnings
 ```
 
-- `tests/1_tokenizer.rs` — spec rows #1–#9
-- `tests/2_grammar.rs` — spec rows #10–#17
-- `tests/3_semantics.rs` — spec rows #18–#25
-
-`tests/` holds exactly the §7 rows. The
-additional tests live next to the code as unit tests:
-
-- `src/engine.rs` — `Relation::insert` checks, set-op type edge cases, and
-  the §8.2 instrumentation counters
-- `src/tokenizer.rs` — lexer edge cases
-- `src/bin/radb_study.rs` — §8.1 data-generator tests
-
-All 25 rows of the §7 table are covered.
-
-## Section 8 — the performance study
+## The storage engine (Module 1)
 
 ```
-cargo run --release --bin radb-study -- write --n 1000 --m 1000 --matches 5
-cargo run --release --bin radb-study -- study
+cargo run --release --bin radb-storage -- create-table --db data --name R \
+    --schema "a:INT,b:VARCHAR(20),c:INT"
+cargo run --release --bin radb-storage -- load --db data --table R --file r.csv
+cargo run --release --bin radb-storage -- scan --db data --table R --frames 8 --json
+cargo run --release --bin radb-storage -- layout --db data --table R --page 1
+cargo run --release --bin radb-storage -- trace --db data --file trace.txt \
+    --frames 16 --policy lru --json
 ```
 
-`radb-study write` writes `R.txt` and `S.txt` in the §4.1 relation-definition
-syntax (load them with `radb -r`). `radb-study study` runs the §8.3 join
-experiment at sizes 1000 through 64000 tuples per relation, then measures
-select and project at the same sizes (§8.4 q3). Progress and the per-size
-select and project figures stream to stderr, so each result appears the
-moment it finishes; stdout carries only the §8.3 join table, so
-`radb-study study > join_table.md` captures just the deliverable. The whole
-sweep takes about a minute; run it with `--release`.
+The CSV file has no header line, one record per line; a field containing a comma
+must be quoted. `scan --json` and `trace --json` print the shapes of M1 §7.
+`docs/M1/DESIGN_M1.md` gives the page, record, catalog and heap formats;
+`docs/M1/REPORT_M1.md` gives the required measurements; `traces/` holds the five
+published traces.
 
-## Self-join: why `rename` is required
+## The execution engine (Module 2)
 
-Case #20 is `rename[E2](Emp) join[Emp.MgrID=E2.EID] Emp` "who is each
-employee's manager". To answer it you need two distinct copies of `Emp`:
-one for the employee, one for their manager.
+```
+cargo run --release --bin radb-exec -- run   --db data --plan plan.json \
+    --frames 32 --json
+cargo run --release --bin radb-exec -- trace --db data --plan plan.json \
+    --frames 32
+```
 
-If you naively write `Emp join[Emp.MgrID=Emp.EID] Emp`, the two operands are
-literally the same relation, so after qualification (§4.3: "`times`:
-all attributes of both inputs, qualified by relation name") every output
-column is named `Emp.EID`, `Emp.Name`, ... the same names on both sides.
-That makes the join's output schema unusable (the two `DID` columns are no
-longer distinguishable, and the engine reports the duplicate as an error),
-and worse, the join condition `Emp.MgrID=Emp.EID` is ambiguous: both sides
-contribute an `Emp.MgrID` and an `Emp.EID`, so there is no way to say
-"this employee's MgrID equals that copy's EID".
+`run` prints the result (JSON with `--json`); `trace` prints one line of
+counters per operator. See `docs/M2/DESIGN_M2.md` and `docs/M2/REPORT_M2.md`.
 
-`rename[E2]` gives the second copy its own name, so its columns come out as
-`E2.EID`, `E2.Name`, ... (spec §4.3: "rename: same attributes under a new
-relation name"). Now the two occurrences have two distinct names, the
-condition `Emp.MgrID=E2.EID` unambiguously compares the employee copy's
-`MgrID` with the manager copy's `EID`, and the output schema keeps both
-sides apart. This is the general self-join problem: any time a query needs a
-relation twice, the two uses must be distinguishable, and `rename` is the
-mechanism that makes it possible — without it, self joins simply cannot be
-expressed.
+## The SQL front end (Module 3)
 
-## Known limitations
+```
+cargo run --release --bin radb-sql -- parse   --query "SELECT ..." --explain
+cargo run --release --bin radb-sql -- compile --db data --file q.sql --json
+cargo run --release --bin radb-sql -- check   --db data --file q.sql
+```
 
-- Relation files are read whole into memory (loading is in scope only for
-  the `radb` front end; the spec says data storage is out of scope).
-- The join is a nested loop; no indexes or hash/sort-merge joins. That is
-  deliberate — §3 and §8 ask you to measure exactly this.
-- Relation names must be identifiers; a relation named after a keyword
-  (e.g. `union`) cannot be referenced. Attribute names can be keywords —
-  see GRAMMAR.md, "Keywords as attribute names".
-- A relation *header* attribute name cannot be qualified: `Q(D.Name, Age)` is
-  a parse error. A qualified name has exactly one period, so a `times` or
-  `join` on such a column would produce `Q.D.Name`, which no query could
-  mention — the column would exist in a result schema and be unusable
-  everywhere else. See GRAMMAR.md, "Qualified names".
+`parse` needs no catalog: with `--explain` it prints the syntax tree, without it
+the token stream. `compile` prints the logical plan (JSON with `--json`,
+otherwise an indented tree). `check` prints only the first error, in the one
+format of M3 §6, and exits 1.
+
+`docs/M3/GRAMMAR_SQL.md` is the EBNF and precedence table;
+`docs/M3/DESIGN_M3.md` covers scope resolution, bag semantics and aggregate
+naming; `docs/M3/REPORT_M3.md` maps the required cases to tests.
+
+## The optimizer (Module 4)
+
+```
+cargo run --release --bin radb-opt -- analyze  --db data --table R --buckets 20
+cargo run --release --bin radb-opt -- plan     --db data --logical q.json \
+    --frames 32 --json
+cargo run --release --bin radb-opt -- explain  --db data --logical q.json \
+    --frames 32
+cargo run --release --bin radb-opt -- dp-table --db data --logical q.json \
+    --frames 32
+```
+
+`plan` emits the physical plan JSON consumed by `radb-exec` without editing.
+`explain` prints one line per node with its estimated rows and own page-I/O
+cost; `dp-table` prints the enumeration table, one row per subset. See
+`docs/M4/DESIGN_M4.md` and `docs/M4/REPORT_M4.md`.
+
+## The integrated shell
+
+```
+cargo run --release --bin radb -- --db data
+```
+
+The prompt accepts the SQL subset, `EXPLAIN [ANALYZE] <query>`,
+`ANALYZE TABLE name`, `SET frames = n`, `LOAD TABLE name FROM 'file.csv'`,
+`help`, and `exit`/`quit`.
+
+## Measurements
+
+The M2 and M4 reports are generated from real CLI runs by a reproducible
+harness:
+
+```
+cargo build --release
+python3 bench/measure.py m2
+python3 bench/measure.py m4
+```
+
+It writes only under `bench/data/` (ignored by git) and prints JSON. The tables
+in `docs/M2/REPORT_M2.md` and `docs/M4/REPORT_M4.md` come from those runs.
+
+## Tests
+
+- `tests/storage.rs` — Module 1 integration (pages, heap files, buffer pool,
+  the `radb-storage` binary).
+- `tests/exec.rs` — Module 2 integration (the `radb-exec` binary).
+- `tests/sql.rs` — Module 3 integration (the fifteen required cases and the §5
+  examples, through the `radb-sql` binary).
+- `tests/optimize.rs` — Module 4 integration (`radb-opt`, explain and DP table).
+- `tests/integration.rs` — SQL text through all four modules, including select
+  aliases, aggregate aliases and a `FROM` subquery.
+- `tests/compiler.rs`, `tests/tokenizer.rs` — the streaming compiler and the
+  condition-language lexer.
+- Unit tests live beside the code in each library module.
+
+## Reading guide
+
+`ARCHITECTURE.md` describes the system and the interface between each pair of
+modules. `docs/` holds the specification, design documents, reports and design
+log for each module. `docs/EXCEPTIONS.md` records every deliberate deviation
+from the specification so it stays visible.
+
+The integration binary lives in `src/bin/radb/`; the four module binaries are
+thin command-line layers (`src/bin/radb_*.rs`) over the library modules.

@@ -1,0 +1,221 @@
+SQL Front End
+
+Parsing SQL, resolving names, translating to relational algebra
+
+SQL text goes in. A logical plan comes out. The parser is the easy half. The hard half is deciding what a query means, because SQL names columns loosely, computes on bags rather than sets, and never says in what order to do anything.
+1  Lexical rules
+
+Hand-written scanner, as in Bonus Project 1. No regular expressions, no parser generators, no eval.
+Keywords	Case insensitive. SELECT, select and SeLeCt are the same token.
+Identifiers	Case sensitive. Emp and emp are different tables. Letter or underscore, then letters, digits, underscores.
+Strings	Single quoted. Two single quotes inside mean one literal quote, as in Bonus Project 1.
+Numbers	Integers only, optionally signed.
+Operators	Maximal munch. <=, >= and <> are single tokens.
+Comments	-- to end of line.
+Statements	Separated by semicolons. A file may hold several.
+2  The SQL subset
+
+statement   ::= create | insert | query
+
+create      ::= CREATE TABLE ident "(" coldef { "," coldef } ")"
+coldef      ::= ident ( INT | VARCHAR "(" int ")" )
+
+insert      ::= INSERT INTO ident VALUES "(" literal { "," literal } ")"
+
+query       ::= select_block { setop select_block }
+setop       ::= UNION [ ALL ] | INTERSECT | EXCEPT
+
+select_block ::= SELECT [ DISTINCT ] select_list
+                 FROM from_list
+                 [ WHERE condition ]
+                 [ GROUP BY col_list [ HAVING condition ] ]
+                 [ ORDER BY sort_list ]
+                 [ LIMIT int ]
+               | "(" query ")"
+
+select_list ::= "*" | select_item { "," select_item }
+select_item ::= ( column | aggregate ) [ AS ident ]
+aggregate   ::= ( COUNT | SUM | AVG | MIN | MAX ) "(" ( column | "*" ) ")"
+
+from_list   ::= table_ref { "," table_ref }
+              | table_ref JOIN table_ref ON condition { JOIN table_ref ON condition }
+table_ref   ::= ident [ AS ident ] | "(" query ")" AS ident
+
+condition   ::= disjunction of conjunctions of comparisons, with NOT and parentheses
+comparison  ::= operand ( "=" | "<>" | "<" | "<=" | ">" | ">=" ) operand
+operand     ::= column | int | string
+column      ::= ident | ident "." ident
+
+Precedence inside conditions, tightest first, is NOT, then AND, then OR. Set operators are left associative and all at the same precedence, so A UNION B EXCEPT C means (A UNION B) EXCEPT C. State both in your grammar document and enforce them in the grammar, not in the parser code.
+3  Name resolution
+
+After parsing, build a scope from the FROM clause. Each table reference contributes one entry, keyed by its alias if it has one and by its table name otherwise. A subquery in FROM must have an alias and contributes that alias with the subquery's output schema.
+
+Then resolve every column reference by these rules, in order.
+Two entries share a name	Error. FROM Emp, Emp is a duplicate alias error. FROM Emp e, Emp m is fine.
+Qualified t.c	t must be in scope, c must exist in t. Otherwise error naming which part failed.
+Unqualified c	Exactly one scope entry must contain c. Zero is an unknown column error. Two or more is an ambiguous column error naming the candidates.
+SELECT *	Expands to every column of every scope entry, in FROM order then schema order, each fully qualified. Shared column names are not an error here, because the expansion qualifies them.
+ORDER BY	Resolve first against output aliases in the select list, then against the FROM scope. A column not in the select list is allowed.
+
+Every resolved column becomes a fully qualified name in the logical plan. After this pass no unqualified name survives anywhere.
+3.1  Aggregation rules
+
+A query is aggregating if it has a GROUP BY clause or an aggregate anywhere in its select list. In an aggregating query the select list may contain only grouping columns and aggregates. A bare column that is not a grouping column is an error. HAVING may reference only grouping columns and aggregates. An aggregate in WHERE is always an error, because WHERE runs before grouping.
+3.2  Type rules
+
+Comparison between different types is an error, including equality, exactly as in Bonus Project 1. SUM and AVG require an INT column. COUNT accepts anything. MIN and MAX accept either type. Set operators require the same column count and the same type in each position.
+4  Bags, not sets
+
+In Bonus Project 1 your projection removed duplicates, because relational algebra is defined on sets. SQL is defined on bags, and this module must follow SQL. The consequences are specific.
+A scan	Returns a bag. Identical rows in a table stay identical rows.
+project	Keeps duplicates. Never emit a distinct node just because a projection dropped columns.
+SELECT DISTINCT	Emits a distinct node above the projection.
+UNION ALL	A union_all node alone.
+UNION	A union node, which deduplicates.
+INTERSECT, EXCEPT	Set semantics, so the result has no duplicates even if the inputs did.
+GROUP BY	Produces one row per distinct group, so it deduplicates the grouping columns by construction. Adding DISTINCT above it is redundant. Do not emit it.
+
+Your design document must state where duplicate elimination happens in your translator and why. This is the section I will read first.
+5  Translation
+
+Build the logical plan in this canonical order, bottom to top. Your translator makes no optimization decisions. Module 4 does that.
+
+1  FROM      scans, renames for aliases, joins or cross products left to right
+2  WHERE     one select node carrying the whole condition unchanged
+3  GROUP BY  group_by node
+4  HAVING    select node above the group_by
+5  SELECT    project node, then distinct if DISTINCT was written
+6  ORDER BY  sort node
+7  LIMIT     limit node
+8  set ops   applied between whole blocks, left associative
+
+Logical operator names are scan, select, project, join, cross, rename, group_by, distinct, sort, limit, union, union_all, intersect, except. A logical plan never names a physical algorithm. It says join, never hash_join.
+5.1  Example, a plain filter and projection
+
+SELECT name, age FROM Emp WHERE age > 30;
+
+{ "op":"project", "columns":["Emp.name","Emp.age"],
+  "child": { "op":"select", "condition":"Emp.age > 30",
+             "child": { "op":"scan", "table":"Emp" } } }
+
+No distinct, because DISTINCT was not written. If two employees share a name and age, both rows appear.
+5.2  Example, a join with aliases
+
+SELECT e.name, d.title
+  FROM Emp e JOIN Dept d ON e.did = d.did
+ WHERE d.budget > 1000;
+
+{ "op":"project", "columns":["e.name","d.title"],
+  "child": { "op":"select", "condition":"d.budget > 1000",
+    "child": { "op":"join", "condition":"e.did = d.did",
+      "left":  { "op":"rename", "to":"e",
+                 "child": { "op":"scan", "table":"Emp" } },
+      "right": { "op":"rename", "to":"d",
+                 "child": { "op":"scan", "table":"Dept" } } } } }
+
+The WHERE predicate sits above the join even though it only touches one side. Leaving it there is correct. Moving it down is Module 4's job and doing it here loses marks.
+5.3  Example, comma join
+
+SELECT * FROM Emp e, Dept d WHERE e.did = d.did;
+
+project over
+  select  condition "e.did = d.did"
+    cross
+      rename e over scan Emp
+      rename d over scan Dept
+
+A comma produces cross and the predicate stays in the select above it. JOIN ... ON produces join with the condition attached. The two forms are semantically equal, and recognising that is one of Module 4's rewrites, not yours.
+5.4  Example, grouping with HAVING
+
+SELECT did, COUNT(*) AS n, AVG(salary) AS avg_sal
+  FROM Emp
+ WHERE age > 25
+ GROUP BY did
+HAVING COUNT(*) > 5
+ ORDER BY n DESC
+ LIMIT 10;
+
+limit 10
+  sort [["n","desc"]]
+    project ["Emp.did","n","avg_sal"]
+      select "n > 5"                          -- HAVING
+        group_by keys ["Emp.did"]
+                 aggregates [["count","*","n"],["avg","Emp.salary","avg_sal"]]
+          select "Emp.age > 25"               -- WHERE
+            scan Emp
+
+WHERE is below the grouping and HAVING is above it. That is the whole difference between the two clauses, and it is why an aggregate cannot appear in WHERE. Aggregate output names come from the AS alias if given, and otherwise from a rule you define and document, such as count_star or avg_Emp_salary.
+5.5  Example, self join
+
+SELECT e.name, m.name FROM Emp e JOIN Emp m ON e.mgr = m.eid;
+
+join condition "e.mgr = m.eid"
+  rename e over scan Emp
+  rename m over scan Emp
+
+The same table scanned twice under two names. Without the renames, Emp.name would be ambiguous and the query would have no meaning. This is the rename operator from Bonus Project 1 doing exactly the job it was built for.
+5.6  Example, subquery in FROM
+
+SELECT t.did, t.n
+  FROM (SELECT did, COUNT(*) AS n FROM Emp GROUP BY did) AS t
+ WHERE t.n > 3;
+
+project ["t.did","t.n"]
+  select "t.n > 3"
+    rename t
+      project ["Emp.did","n"]
+        group_by keys ["Emp.did"] aggregates [["count","*","n"]]
+          scan Emp
+
+The subquery is translated on its own and then renamed. Its output schema becomes the scope entry for t, so the outer query can see t.n and nothing else.
+5.7  Example, the two unions
+
+SELECT city FROM Emp UNION ALL SELECT city FROM Dept;
+   union_all( project[Emp.city](scan Emp), project[Dept.city](scan Dept) )
+
+SELECT city FROM Emp UNION SELECT city FROM Dept;
+   union( project[Emp.city](scan Emp), project[Dept.city](scan Dept) )
+
+Same inputs, one node different, and in a large database the difference between these two plans is a sort of the whole result. Your explain output must make the difference visible.
+6  Errors
+
+One format for everything. No stack traces.
+
+error: <category>: <message> at line L, column C
+
+categories: lexical, syntax, name, ambiguity, type, aggregate, schema
+
+Panic mode is enough. Report the first error and stop. Multi-error recovery is not graded.
+7  Required cases
+1	The self join in 5.5. Two renames over one table.
+2	SELECT * over three tables where two share a column name. Expansion qualifies both, no error.
+3	An unqualified column present in two tables. Ambiguity error naming both candidates.
+4	UNION and UNION ALL on identical inputs, producing different plans.
+5	WHERE and HAVING in one query, landing on opposite sides of the grouping.
+6	A non-grouped column in the select list of a GROUP BY query. Aggregate error.
+7	An aggregate in WHERE. Aggregate error.
+8	A subquery in FROM with an alias, joined to a base table.
+9	ORDER BY on a column that is not in the select list.
+10	WHERE age > '30' where age is INT. Type error.
+11	Unknown table and unknown column, with different messages.
+12	FROM Emp, Emp without aliases. Duplicate alias error.
+13	SELECT COUNT(*) FROM Emp with no GROUP BY. One row out, even when Emp is empty.
+14	A UNION of two queries whose column types do not match. Schema error.
+15	A four table join chain, written both with commas and with JOIN ON, producing plans that differ only in where the predicates sit.
+8  Command line interface
+
+sql parse   --query "SELECT ..." --explain      // indented tree, no catalog needed
+sql compile --db DIR --file q.sql --json        // logical plan JSON
+sql check   --db DIR --file q.sql               // errors only, exit code 0 or 1
+
+I grade this module by compiling my own SQL files against a catalog I supply and comparing your logical plans structurally. Node names and field names must match this document. Node order within a plan must match the canonical order in Section 5.
+9  Deliverables and checklist
+
+GRAMMAR_SQL.md with your EBNF, your precedence and associativity table, and the places where your grammar differs from the sketch in Section 2 and why. DESIGN_M3.md with your scope and resolution algorithm, your bag semantics decisions, and your aggregate naming rule. Tests for all fifteen cases. DESIGN_LOG.md entries.
+
+    Every example in Section 5 reproduces as a plan with the same shape.
+    No logical plan you produce contains a physical operator name.
+    No logical plan contains an unqualified column reference.
+    No predicate has been moved from where the SQL put it.
+    Plans from this module load and run in your Module 2 executor once Module 4 turns them physical.

@@ -1,0 +1,228 @@
+Storage Engine and Buffer Pool
+
+Pages, records, heap files, replacement policies
+
+This document defines every structure and operation in Module 1 exactly. Where a byte offset or a formula is given, it is required, not a suggestion. Where a choice is left to you, the text says so and asks you to document it.
+
+The reason for this precision is that I grade this module by running your tool on my files and comparing numbers. Two correct implementations must produce the same counters.
+1  Files and page addressing
+
+One file per table, named <table>.db, plus one catalog.db. Every file is a sequence of 4096 byte pages with no header outside the pages themselves.
+
+A page id is the zero-based index of the page inside its file. Page id 0 is the first page. A record id, written rid, is the pair (page id, slot number).
+
+All multi-byte integers are little-endian. Unsigned unless stated.
+2  Record format
+
+A record is the concatenation of its field encodings, in schema order. There is no record header and no null bitmap, because this project has no NULL values.
+Type 	Encoding
+INT	4 bytes, signed, two's complement.
+VARCHAR(n)	2 byte unsigned length L, then L bytes of UTF-8. L must not exceed n. n must not exceed 255.
+
+Example. Schema (a INT, b VARCHAR(5), c INT) and tuple (42, 'bob', 7).
+
+a   2A 00 00 00          4 bytes
+b   03 00 62 6F 62       2 + 3 bytes
+c   07 00 00 00          4 bytes
+                        ---------
+record length            13 bytes
+
+Record length is therefore fixed for a schema of INT columns and variable when any VARCHAR is present. Your code must not assume fixed length.
+3  Slotted page format
+
+Header at the start, slot directory growing forward, record data growing backward from the end of the page.
+
+offset  size  field
+     0     4  page_id          uint32
+     4     2  slot_count       uint16   includes dead slots
+     6     2  free_end         uint16   lowest byte offset used by record data
+     8     4  slot 0           uint16 offset, uint16 length
+    12     4  slot 1
+   ...
+                               <-- free space -->
+ free_end                      record data, newest at the lowest offset
+  4095                         end of page
+
+A slot with offset 0 is dead, meaning the record it referred to was deleted. Slot numbers are never reused and never renumbered, because a rid must stay valid.
+
+Free space on a page is free_end − (8 + 4 × slot_count). An insert of a record of length L needs L + 4 bytes of free space, because it also needs a new slot.
+3.1  Operations
+
+insert(record) -> slot_no or NO_SPACE
+    L = len(record)
+    if free_space < L + 4: return NO_SPACE
+    free_end  = free_end - L
+    write record at free_end
+    slot[slot_count] = (free_end, L)
+    slot_count = slot_count + 1
+    return slot_count - 1
+
+get(slot_no) -> record
+    error if slot_no >= slot_count
+    error if slot[slot_no].offset == 0        // deleted
+    return bytes at offset, length
+
+delete(slot_no)
+    error if already dead
+    slot[slot_no] = (0, 0)
+    // space is NOT reclaimed until compaction
+
+3.2  Worked example
+
+An empty page, then three inserts of 13, 20 and 13 bytes, then a delete of slot 1. Your layout command must produce these numbers.
+After 	slot_count 	free_end 	free space 	slot directory
+empty page	0	4096	4088	empty
+insert 13 bytes	1	4083	4071	0:(4083,13)
+insert 20 bytes	2	4063	4047	1:(4063,20)
+insert 13 bytes	3	4050	4030	2:(4050,13)
+delete slot 1	3	4050	4030	1:(0,0)
+
+Note the last row. Deleting a 20 byte record freed no usable space. Compaction is optional in this module. If you implement it, document when it runs and show the before and after in your design document.
+3.3  Capacity
+
+For fixed length records of L bytes, the number per page is floor(4088 / (L + 4)). For L = 13 that is 240. You will be asked to confirm this by measurement in Section 8.
+
+A record longer than 4088 bytes cannot be stored. Report this as an error naming the table and the row. Overflow pages are out of scope.
+4  Heap file
+
+A heap file is a linked list of directory pages, each listing data pages and their free space. Page 0 of every table file is the first directory page.
+
+directory page layout
+offset  size  field
+     0     4  page_id          uint32
+     4     4  next_dir_page    uint32, 0xFFFFFFFF if none
+     8     2  entry_count      uint16
+    10     6  entry 0          uint32 data_page_id, uint16 free_bytes
+    16     6  entry 1
+   ...
+
+capacity = floor((4096 - 10) / 6) = 681 entries per directory page
+
+4.1  Operations
+
+insert(record) -> rid
+    walk directory pages, first fit, looking for free_bytes >= len+4
+    if found: fetch that data page, insert, update the entry, unpin both
+    if none:  allocate a new data page, add an entry, insert there
+    return (page_id, slot_no)
+
+get(rid) -> record
+    fetch page, read slot, unpin. Two page accesses at most.
+
+delete(rid)
+    fetch page, mark slot dead, update directory free_bytes, unpin
+
+scan() -> iterator of (rid, record)
+    for each directory page:
+      for each entry:
+        fetch data page
+        for each live slot: yield
+        unpin data page before moving on
+
+The scan rule is strict. At most one data page and one directory page may be pinned at any instant during a scan. A scan that reads the whole table into a list fails this module no matter what it returns, and it will be visible as a page read count that does not grow with the memory budget.
+5  Buffer pool
+
+A fixed array of B frames. Each frame holds one page's bytes, a pin count and a dirty flag. A page table maps page id to frame index.
+
+fetch_page(page_id) -> page
+    if page_id in page_table:
+        pin_count += 1
+        policy.on_access(frame)         // counts as a HIT
+        return frame
+    frame = policy.choose_victim()      // only frames with pin_count == 0
+    if frame is None: error "no unpinned frame available"
+    if frame.dirty: disk.write_page(frame.page_id, frame.data)   // WRITE
+    disk.read_page(page_id) into frame                           // READ
+    pin_count = 1, dirty = false
+    policy.on_access(frame)             // counts as a MISS and an EVICTION
+    return frame                        //   (eviction only if a page was replaced)
+
+unpin_page(page_id, is_dirty)
+    error if not resident or pin_count == 0
+    dirty = dirty or is_dirty
+    pin_count -= 1
+
+new_page() -> page                      // zero filled, pinned, dirty
+flush_all()                             // write every dirty frame, clear flags
+stats() -> { hits, misses, evictions, reads, writes }
+
+Counting rules, which must be exact. A hit is a fetch of a resident page. A miss is a fetch that required a disk read. An eviction is a miss that replaced a resident page, so the first B misses on an empty pool are not evictions. A read is one call to the disk manager's read. A write is one call to its write, whether caused by eviction or by flush.
+5.1  LRU
+
+Keep an ordering of frames by last access. Every fetch, hit or miss, moves that frame to most recently used. The victim is the least recently used frame whose pin count is zero.
+5.2  CLOCK
+
+Frames sit in a circle with a reference bit each and a hand pointing at one of them. Every fetch, hit or miss, sets that frame's reference bit to 1. A newly loaded page gets reference bit 1 and the hand advances past it.
+
+choose_victim()
+    swept = 0
+    loop:
+        f = frames[hand]
+        if f.pin_count > 0:        hand += 1; swept += 1
+        else if f.ref == 1:        f.ref = 0; hand += 1; swept += 1
+        else:                      victim = f; hand += 1; return victim
+        if swept > 2 * B: return None      // every frame pinned
+
+5.3  Worked example
+
+B = 3, all pages clean, each page unpinned immediately after fetching. Trace 1 2 3 1 4 2.
+Fetch 	LRU result, pool after 	CLOCK result, pool after
+1	miss, [1]	miss, [1]
+2	miss, [1,2]	miss, [1,2]
+3	miss, [1,2,3]	miss, [1,2,3]
+1	hit, LRU order 2,3,1	hit, ref(1)=1
+4	miss, evict 2, [3,1,4]	miss, sweep clears 1,2,3 then evicts 1, [4,2,3]
+2	miss, evict 3, [1,4,2]	hit, ref(2)=1
+Totals	1 hit, 5 misses, 2 evictions	2 hits, 4 misses, 1 eviction
+
+Run this trace first. If your numbers differ from the table, your policy is wrong and every later measurement will be wrong with it.
+6  Catalog and loading
+
+The catalog lives in catalog.db and is read through the buffer pool like any other data. Its on-page format is yours to design, and your design document must give it. For each table it stores the name, the ordered list of columns with type and length, the data file name, the number of pages and the number of live tuples. Module 4 will add statistics to the same structure, so leave room.
+
+The loader reads a CSV file with no header line, one record per line, fields separated by commas. A field containing a comma must be wrapped in double quotes. An INT field that does not parse, or a VARCHAR longer than its declared length, is an error naming the line number, and the load stops.
+7  Command line interface
+
+storage create-table --db DIR --name R --schema "a:INT,b:VARCHAR(20),c:INT"
+storage load         --db DIR --table R --file r.csv
+storage scan         --db DIR --table R --frames 8 [--limit N] --json
+storage layout       --db DIR --table R --page 3
+storage trace        --db DIR --file trace.txt --frames 16 --policy lru|clock --json
+
+Required JSON shapes. Extra fields are allowed. Missing or renamed fields fail the automated check.
+
+scan --json
+{ "table": "R",
+  "schema": [["a","INT"],["b","VARCHAR",20],["c","INT"]],
+  "rows": [[42,"bob",7],[43,"amy",9]],
+  "stats": {"hits":12,"misses":4,"evictions":1,"reads":4,"writes":0} }
+
+trace --json
+{ "policy":"lru", "frames":16,
+  "hits":812, "misses":188, "evictions":172, "reads":188, "writes":0 }
+
+A trace file holds one page id per line. Your pool fetches each one and unpins it immediately as clean. Five traces are published with this document. Two more are held back for grading.
+8  Required measurements
+
+Capacity. For three schemas, one all INT, one with a short VARCHAR and one with a VARCHAR(200), compute records per page by hand from Section 3 and then measure it by loading data. One table, three rows, with the computed and measured values side by side. Explain any difference.
+
+Policies. Run all five published traces under both policies at B = 4, 16, 64 and 256. Report hit rate in one table of twenty rows per policy. Trace 3 is a sequential scan of an 80 page file repeated ten times. State what LRU achieves on it at B = 64, explain the mechanism in two sentences, and say which policy you would ship and why.
+
+Scan cost. Scan a 500 page table at B = 2, 8 and 64. Page reads should be roughly 500 in every case. If your number falls as B grows, explain what is being cached. If it rises, something is wrong.
+9  Errors
+Evicting a pinned page	Never happens. If no unpinned frame exists, fetch fails with an error.
+Unpinning a page at pin count 0	Error. This catches the most common bug in this module.
+Reading a dead slot	Error naming the rid.
+Record longer than 4088 bytes	Error naming the table and row.
+Bad CSV field	Error naming the line number and the column.
+10  Deliverables and checklist
+
+DESIGN_M1.md with your catalog page format, your free space strategy, your compaction decision, and a byte level diagram of a real page from your own files. REPORT_M1.md with the three measurements. DESIGN_LOG.md entries. Tests.
+
+Before you submit, confirm the following.
+
+    The page example in Section 3.2 reproduces exactly.
+    The buffer example in Section 5.3 reproduces exactly, both policies.
+    A scan of a table twenty times larger than B completes, and never pins more than two pages.
+    Running the same command twice gives identical counters.
+    Deleting every record in a table and scanning it returns nothing, without error.

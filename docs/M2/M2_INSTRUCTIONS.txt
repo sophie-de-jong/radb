@@ -1,0 +1,216 @@
+Execution Engine
+
+Iterators, external sorting, three join algorithms, one memory budget
+
+This module takes a physical plan and runs it against Module 1. Every operator in it obeys the same interface and the same memory rule. The rule is the hard part, and it is what separates this from the relational algebra engine you already wrote.
+1  Ground rules
+1.1  The iterator interface
+
+open()                  prepare, acquire buffers, do any blocking work
+next() -> tuple | END    produce the next output tuple
+close()                 release every buffer and temporary file
+counters() -> { tuples_out, comparisons, page_reads, page_writes }
+
+Calling next on the root pulls one tuple through the whole tree. An operator calls next on its children, it never reaches past them, and it never asks the catalog or the disk for anything except through Module 1.
+
+After close every page the operator pinned is unpinned and every temporary file it created is deleted. A plan that finishes with pinned pages left over is a failure even if the tuples were right.
+1.2  The memory budget
+
+The whole plan gets B frames. B is given by --frames and is as small as 4 during grading. An operator that needs working memory requests a number of frames at open and holds no more than that.
+
+How you divide B among the operators in a plan is your decision, and your design document must state the rule. A simple, defensible rule is to give every blocking operator an equal share and give pipelined operators one frame each. Whatever you choose, running the same plan at the same B must produce the same counters every time.
+
+Holding more than B pages at any moment is a correctness failure. This includes holding tuples in a language level list or dictionary that is not counted against the budget. If a hash table holds 200,000 tuples while B is 8, the operator is wrong regardless of how fast it runs.
+1.3  Tuples, schemas and comparisons
+
+A schema is an ordered list of qualified column names such as R.a, each with a type. Join output schema is the left schema followed by the right schema, unchanged. Two columns with the same qualified name in one schema is an error at open.
+
+Comparison rules are the ones from Bonus Project 1. Same type only. INT against VARCHAR is an error, for every operator including equality. VARCHAR ordering is byte-wise on the UTF-8 encoding.
+1.4  What the counters mean
+tuples_out	Tuples this operator returned from next.
+comparisons	Times this operator evaluated a condition or compared two keys, whether or not it matched. Each operator owns its own counter. A join that fuses its condition into its inner loop reports all of them on the join.
+page_reads, page_writes	Disk manager calls attributed to this operator, including reads and writes of its own temporary files.
+2  The operators
+
+In the cost formulas below, M is the number of pages of the left or outer input and N the number of pages of the right or inner input.
+2.1  seqscan
+
+Returns every live tuple of a table in heap order. One data page pinned at a time. Frames 1. Cost M reads. Comparisons 0.
+
+{ "op": "seqscan", "table": "R" }
+
+2.2  filter
+
+Evaluates a condition on each input tuple and passes through the ones that hold. Output schema is the input schema. Fully pipelined, frames 1, no I/O of its own. Comparisons increase by one per tuple examined, not per comparison operator inside a compound condition.
+
+{ "op": "filter", "condition": "R.a > 500 and R.b = 'cs'", "child": { ... } }
+
+2.3  project
+
+Keeps the listed columns in the listed order. It does not remove duplicates. This is the single most important difference from Bonus Project 1, where projection was a set operation. Here the algebra is on bags and duplicate removal is a separate operator. Pipelined, frames 1.
+
+{ "op": "project", "columns": ["R.a","R.c"], "child": { ... } }
+
+2.4  distinct
+
+Removes duplicate tuples. Two implementations, selected by the plan. Sort based, which sorts the input and drops adjacent equals, costing what the sort costs. Hash based, which partitions to disk when the table of seen tuples exceeds its frames, then deduplicates partition by partition.
+
+{ "op": "distinct", "mode": "sort" | "hash", "child": { ... } }
+
+2.5  sort
+
+External merge sort. It must sort an input of 20 × B pages, which means it cannot hold the input in memory and you cannot call your language's sort on the whole thing. You may call it on one run that already fits in memory.
+
+pass 0, run generation
+    fill B frames with input tuples, sort in memory, write one run to a temp file
+    repeat until input exhausted      -> R0 = ceil(N / B) runs
+
+pass k, merging
+    merge B-1 runs at a time, 1 frame for output
+    repeat until one run remains
+
+the final pass does not write. It streams tuples to the parent through next().
+
+Number of passes is 1 + ceil(log(ceil(N/B)) / log(B-1)). The sort is a blocking operator. Pass 0 and every merge pass except the last happen inside open.
+
+Worked example. N = 8 pages, B = 3.
+Pass 	What happens 	reads 	writes
+0	ceil(8/3) = 3 runs of 3, 3 and 2 pages	8	8
+1	merge 2 of the 3 runs, carry the third, leaving 2 runs	6	6
+2	merge the last 2 runs, streaming to the parent	8	0
+Total	3 passes	22	14
+
+Carrying a run forward untouched rather than rewriting it is one valid strategy. If yours rewrites it instead, your numbers will be 8 and 8 on pass 1 and that is also acceptable. State which you do, because your measured totals must match your own description.
+
+{ "op": "sort", "keys": [["R.a","asc"],["R.b","desc"]], "child": { ... } }
+
+2.6  group_by
+
+Groups by zero or more columns and computes aggregates per group. Sort based and hash based implementations, selected by the plan, with the same output as bags in unspecified order.
+
+Aggregates are COUNT, SUM, AVG, MIN, MAX. COUNT(*) counts tuples. SUM and AVG require INT. AVG returns a real number printed to four decimal places. MIN and MAX work on both types.
+
+Two edge cases that are easy to get wrong. With no grouping columns and an empty input, the output is exactly one row, with COUNT 0 and the other aggregates undefined, which is an error if requested. With grouping columns and an empty input, the output is zero rows.
+
+{ "op": "group_by", "mode": "sort" | "hash",
+  "keys": ["R.dept"],
+  "aggregates": [["count","*"],["avg","R.salary"],["max","R.name"]],
+  "child": { ... } }
+
+output schema: R.dept, count_star, avg_R_salary, max_R_name
+
+2.7  nested_loop_join
+
+Block nested loop. Read B − 2 pages of the outer into memory, then stream the entire inner past it one page at a time, testing every pair. Repeat for each outer block. One frame for the inner page and one for output.
+
+cost        = M + ceil(M / (B-2)) * N        page reads
+comparisons = |R| * |S|                      tuples, not pages
+
+The comparison count does not depend on B, on the condition, or on how many pairs match. You compare every pair because a match is unknown until you compare it. The page read count does depend on B, sharply. Your report will show both.
+
+This operator accepts any condition, not only equality, so it is the only join that can serve an inequality predicate.
+
+{ "op": "nested_loop_join", "condition": "R.b = S.b",
+  "left": { ... }, "right": { ... } }
+
+2.8  sort_merge_join
+
+Equality conditions only. Sort both inputs on the join key using your sort operator, then advance two cursors in step. Duplicate keys on both sides are where this algorithm is usually written wrong, so the handling is specified here.
+
+r = first of R, s = first of S
+while r and s:
+    if r.key < s.key:  advance r
+    elif r.key > s.key: advance s
+    else:
+        mark = position of s
+        for each r' in the run of R with this key:
+            rewind s to mark
+            for each s' in the run of S with this key:
+                emit (r', s')
+        advance r past its run, advance s past its run
+
+cost        = sort(M) + sort(N) + M + N
+comparisons = key comparisons in the merge, plus those inside the sorts
+
+Worked example. R.b = [1, 2, 2, 3] and S.b = [2, 2, 4]. The output has four rows, every pairing of the two 2s on the left with the two 2s on the right. If your implementation produces two rows, your cursor advanced instead of rewinding.
+
+A run of equal keys may be larger than B. Say in your design document what you do about that. Spilling the inner run to a temporary file is acceptable. Assuming it fits is not.
+2.9  hash_join
+
+Equality conditions only. Grace hash join in two phases.
+
+partition phase
+    choose P = B - 1 output partitions
+    scan R, write each tuple to partition h1(key) mod P
+    scan S, write each tuple to partition h1(key) mod P
+    matching tuples are now guaranteed to share a partition number
+
+probe phase
+    for i in 0..P-1:
+        build an in-memory hash table on R_i using h2
+        scan S_i, probe, emit matches
+        discard the table
+
+cost = 2(M + N) partitioning + (M + N) probing = 3(M + N)
+
+Partition overflow is required behaviour, not an edge case. If Ri is still larger than B − 1 pages, you must do one of the following, and say which in your design document. Partition Ri and Si again with a different hash function, to a stated recursion depth. Or fall back to a block nested loop join on that one partition pair.
+
+Neither choice is better. Both are defensible. Silently building a hash table larger than the budget is neither.
+
+{ "op": "hash_join", "condition": "R.b = S.b",
+  "left": { ... }, "right": { ... } }        // left is the build side
+
+2.10  Set operators
+
+Both inputs must have the same number of columns with the same types, position by position. Column names may differ, and the output takes the left input's names.
+union_all	Concatenation. Pipelined, one frame, no deduplication.
+union	Concatenation followed by duplicate removal.
+intersect	Set semantics. A tuple appears once in the output if it appears at least once on both sides.
+except	Set semantics. A tuple appears once if it is on the left and not on the right.
+limit	Returns the first n tuples, then stops pulling from its child. Must actually stop.
+
+Intersect and except are blocking and must work when both inputs exceed memory, by sorting or by partitioning. Neither may read one side entirely into a hash set without respecting B.
+3  Memory summary
+Operator 	Blocking 	Frames it may hold
+seqscan, filter, project, union_all, limit	no	1
+sort, distinct, group_by, intersect, except	yes	its allocated share
+nested_loop_join	no	B − 2 outer, 1 inner, 1 output
+sort_merge_join	on open	its sorts, then 3 for the merge
+hash_join	on open	B − 1 partitions plus 1 input
+4  Running it
+
+exec run   --db DIR --plan plan.json --frames 32 --json
+exec trace --db DIR --plan plan.json --frames 32        // per operator counters
+
+run --json
+{ "schema": [["R.a","INT"],["S.c","VARCHAR",20]],
+  "rows": [[42,"bob"]],
+  "totals": {"tuples_out":1,"comparisons":4000,"page_reads":120,"page_writes":0} }
+
+trace output, one line per node, in plan order, indented by depth
+hash_join          tuples_out=1     comparisons=4000  reads=96  writes=48
+  seqscan R        tuples_out=200   comparisons=0     reads=24  writes=0
+  seqscan S        tuples_out=150   comparisons=0     reads=24  writes=0
+
+A plan whose JSON does not conform must be rejected with a message naming the offending node and the problem. A plan referring to an unknown table or column is rejected at open, before any work happens.
+5  Required measurements
+
+Cost against formula. For each of the three joins, at B = 4, 16, 64, 256 and three relation sizes, put measured page reads and writes beside the formula from Section 2. One table. Where measurement and formula disagree, explain the gap. The explanation earns more than the agreement does.
+
+Sort passes. Measure the number of passes against 1 + ceil(log(ceil(N/B)) / log(B-1)) for at least six combinations of N and B, including one where N is 20 × B.
+
+Crossover. Fix two relations and vary B. Report which join is cheapest at each B, and plot all three. Then fix B and vary relation size and do the same. Name the point where the ranking changes and explain what causes it.
+
+Skew. Build a dataset where one join key value appears in 40 percent of the rows on both sides. Run the hash join. Report your partition sizes, what your overflow handling did, and what it cost compared to the uniform case.
+
+The budget. Run one plan containing a sort of 20 × B pages at B = 4 and show that it completes. State the largest number of frames your implementation held at once, and how you know.
+6  Checklist before submitting
+
+    The sort example in 2.5 reproduces, or your own documented variant does.
+    The duplicate key example in 2.8 returns four rows.
+    All three joins on the same inputs return the same bag of tuples.
+    Block nested loop reports exactly |R| × |S| comparisons.
+    Every plan runs at B = 4.
+    A join whose output is larger than both inputs completes.
+    An empty input through every operator returns cleanly, including group_by.
+    After any plan finishes, the buffer pool has no pinned frames and no temporary files remain.
