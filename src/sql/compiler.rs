@@ -21,7 +21,7 @@ use crate::sql::parser::Parser;
 use crate::sql::plan::Plan;
 use crate::sql::resolve::{Scope, requalify};
 use crate::sql::tokenizer::Position;
-use crate::storage::Catalog;
+use crate::storage::{Catalog, TableMeta};
 use crate::{Schema, Value};
 
 /// One checked statement.
@@ -70,9 +70,18 @@ impl<'a> Compiler<'a> {
     }
 
     /// Parse, check, and convert every remaining statement.
+    ///
+    /// A `CREATE TABLE` in the same input contributes to a private catalog view
+    /// for the statements after it, so `CREATE ...; INSERT ...; SELECT ...`
+    /// compiles as one script. The view never writes to disk: `compile` is a
+    /// front-end operation, not execution.
     pub fn compile_all(&mut self, catalog: &Catalog) -> Result<Vec<Statement>, SqlError> {
+        let mut catalog = catalog.clone();
         let mut statements = Vec::new();
-        while let Some(statement) = self.compile(catalog)? {
+        while let Some(statement) = self.compile(&catalog)? {
+            if let Statement::Create { name, schema } = &statement {
+                let _ = catalog.insert(TableMeta::new(name.clone(), schema.clone()));
+            }
             statements.push(statement);
         }
         Ok(statements)

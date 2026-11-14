@@ -21,6 +21,17 @@ use crate::storage::{
 use crate::{Row, Schema};
 use crate::{Value, csv};
 
+/// The outcome of one statement in a SQL script.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StatementOutcome {
+    /// A query that produced these rows, possibly none.
+    Rows(Vec<Row>),
+    /// A `CREATE TABLE`.
+    Created,
+    /// An `INSERT`.
+    Inserted,
+}
+
 /// A database: a buffer pool, its catalog, and the four modules wired together.
 pub struct Database {
     path: PathBuf,
@@ -101,30 +112,55 @@ impl Database {
     }
 
     /// Run every statement in `sql`, returning the rows any queries produced.
+    ///
+    /// This flattens a multi-statement script into one row list. Callers that
+    /// present a script should use [`Database::execute_sql_script`] to keep the
+    /// per-statement result boundaries.
     pub fn execute_sql(&mut self, sql: &str) -> Result<Vec<Row>, Box<dyn Error>> {
-        let mut compiler = Compiler::new(sql)?;
         let mut rows = Vec::new();
-        // Compile and run one statement at a time, so a later statement sees a
-        // table an earlier one just created.
+        for outcome in self.execute_sql_script(sql)? {
+            if let StatementOutcome::Rows(statement_rows) = outcome {
+                rows.extend(statement_rows);
+            }
+        }
+        Ok(rows)
+    }
+
+    /// Run every statement in `sql`, returning one outcome per statement.
+    ///
+    /// Statements are compiled and executed one at a time, so a later statement
+    /// sees a table an earlier one just created. Keeping the outcomes separate
+    /// lets the shell put a visible boundary between two result sets.
+    pub fn execute_sql_script(
+        &mut self,
+        sql: &str,
+    ) -> Result<Vec<StatementOutcome>, Box<dyn Error>> {
+        let mut compiler = Compiler::new(sql)?;
+        let mut outcomes = Vec::new();
         while let Some(statement) = compiler.compile(&self.catalog)? {
-            match statement {
+            let outcome = match statement {
                 Statement::Select(plan) => {
                     let mut optimizer = Optimizer::new(plan, &self.catalog, self.frames);
                     optimizer.optimize()?;
                     let plan = optimizer.finish()?;
-                    let new_rows = self
+                    let rows = self
                         .executor(&plan)?
                         .by_ref()
                         .collect::<Result<Vec<_>, _>>()?;
-                    rows.extend(new_rows);
+                    StatementOutcome::Rows(rows)
                 }
                 Statement::Create { name, schema } => {
                     self.create_table(&name, schema)?;
+                    StatementOutcome::Created
                 }
-                Statement::Insert { table_name, values } => self.insert(&table_name, &values)?,
-            }
+                Statement::Insert { table_name, values } => {
+                    self.insert(&table_name, &values)?;
+                    StatementOutcome::Inserted
+                }
+            };
+            outcomes.push(outcome);
         }
-        Ok(rows)
+        Ok(outcomes)
     }
 
     /// Create an empty table.

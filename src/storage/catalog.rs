@@ -109,6 +109,7 @@ impl TableMeta {
 }
 
 /// The open catalog: which pages it occupies, and its tables in creation order.
+#[derive(Clone)]
 pub struct Catalog {
     /// The buffer-pool file id of `catalog.db`.
     pub file: FileId,

@@ -37,8 +37,3 @@ combination of M3’s self-join case and M2’s physical plan: M2 has no `rename
 operator, so without a way to distinguish two scans of the same table a
 self-join cannot be executed. Plans written to the M2 specification are
 unaffected because the field is optional and absent by default.
-
-All other implementation choices (binary names, the score counters that include
-the catalog read, the budget’s degrade-to-fit rule and rule 7’s final cleanup)
-stay within the module contracts and are described in the relevant design
-documents rather than listed as deviations here.

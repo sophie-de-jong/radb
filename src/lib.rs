@@ -37,7 +37,7 @@ pub mod optimize;
 pub mod sql;
 pub mod storage;
 
-pub use database::Database;
+pub use database::{Database, StatementOutcome};
 pub use exec::order::Direction;
 pub use exec::plan::{Mode, SortKey};
 pub use schema::{Column, ColumnType, Schema, SemanticError};

@@ -10,8 +10,8 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use radb::Database;
 use radb::optimize::analyze::DEFAULT_BUCKETS;
+use radb::{Database, StatementOutcome};
 
 mod command;
 use command::Command;
@@ -57,11 +57,21 @@ fn cli() -> Result<(), Box<dyn std::error::Error>> {
         match line.parse::<Command>() {
             Ok(Command::Exit) => break,
             Ok(Command::Help) => print_help(),
-            Ok(Command::Sql(sql)) => match db.execute_sql(&sql) {
-                Ok(rows) => {
-                    for row in rows {
-                        let line: Vec<String> = row.iter().map(ToString::to_string).collect();
-                        println!("{}", line.join("\t"));
+            Ok(Command::Sql(sql)) => match db.execute_sql_script(&sql) {
+                Ok(outcomes) => {
+                    let mut printed_result = false;
+                    for outcome in outcomes {
+                        if let StatementOutcome::Rows(rows) = outcome {
+                            if printed_result {
+                                println!();
+                            }
+                            printed_result = true;
+                            for row in rows {
+                                let line: Vec<String> =
+                                    row.iter().map(ToString::to_string).collect();
+                                println!("{}", line.join("\t"));
+                            }
+                        }
                     }
                 }
                 Err(err) => eprintln!("Error: {err}"),

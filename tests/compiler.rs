@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use radb::{Compiler, Database, Row, Statement, Value};
+use radb::{Compiler, Database, Row, Statement, StatementOutcome, Value};
 
 fn temp_dir(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -45,6 +45,39 @@ fn streams_create_insert_and_select() {
     let second = compiler.compile(db.catalog()).unwrap().unwrap();
     assert!(matches!(second, Statement::Select(_)));
     assert!(compiler.compile(db.catalog()).unwrap().is_none());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A script's later statements see a table created earlier in the same script,
+/// both when compiling the script and when executing it.
+#[test]
+fn scripts_see_earlier_create_statements() {
+    let dir = temp_dir("script");
+    let mut db = Database::open(&dir).unwrap();
+    let script = "CREATE TABLE X (a INT);\n\
+                  INSERT INTO X VALUES (1);\n\
+                  INSERT INTO X VALUES (2);\n\
+                  SELECT a FROM X;";
+
+    let mut compiler = Compiler::new(script).unwrap();
+    let statements = compiler.compile_all(db.catalog()).unwrap();
+    assert_eq!(statements.len(), 4);
+    assert!(matches!(statements[0], Statement::Create { .. }));
+    assert!(matches!(statements[1], Statement::Insert { .. }));
+    assert!(matches!(statements[3], Statement::Select(_)));
+
+    let outcomes = db.execute_sql_script(script).unwrap();
+    assert_eq!(outcomes.len(), 4);
+    assert_eq!(outcomes[0], StatementOutcome::Created);
+    assert_eq!(outcomes[1], StatementOutcome::Inserted);
+    assert_eq!(
+        outcomes[3],
+        StatementOutcome::Rows(vec![
+            Row::from(vec![Value::Int(1)]),
+            Row::from(vec![Value::Int(2)]),
+        ])
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }

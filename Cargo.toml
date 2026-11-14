@@ -2,6 +2,7 @@
 name = "radb"
 version = "0.2.0"
 edition = "2024"
+default-run = "radb"
 
 # Module 1's standalone storage tool.
 [[bin]]
