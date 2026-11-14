@@ -408,47 +408,40 @@ fn rename_operand(operand: &Operand, mapping: &HashMap<String, String>) -> Opera
 
 impl fmt::Display for Condition {
     /// Render the JSON wire form: `left op right`, lower-case `and`/`or`/`not`,
-    /// with parentheses only where precedence would otherwise change the tree.
+    /// with parentheses only where the tree would otherwise change shape.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&render(self).0)
-    }
-}
-
-/// Render a condition and report its precedence, so a parent can decide
-/// whether to wrap it.
-fn render(condition: &Condition) -> (String, u8) {
-    match condition {
-        Condition::Compare(compare) => (
-            format!("{} {} {}", compare.left, compare.op, compare.right),
-            3,
-        ),
-        Condition::Not(inner) => {
-            let (text, precedence) = render(inner);
-            let text = if precedence < 2 {
-                format!("({text})")
-            } else {
-                text
-            };
-            (format!("not {text}"), 2)
+        match self {
+            Condition::Compare(compare) => {
+                write!(f, "{} {} {}", compare.left, compare.op, compare.right)
+            }
+            Condition::Not(inner) => {
+                f.write_str("not ")?;
+                match inner.as_ref() {
+                    Condition::And(_, _) | Condition::Or(_, _) => write!(f, "({inner})"),
+                    _ => write!(f, "{inner}"),
+                }
+            }
+            Condition::And(left, right) => {
+                write_and_side(f, left)?;
+                f.write_str(" and ")?;
+                write_and_side(f, right)
+            }
+            Condition::Or(left, right) => {
+                write!(f, "{left} or ")?;
+                match right.as_ref() {
+                    Condition::Or(_, _) => write!(f, "({right})"),
+                    _ => write!(f, "{right}"),
+                }
+            }
         }
-        Condition::And(a, b) => (
-            format!("{} and {}", render_child(a, 1), render_child(b, 1)),
-            1,
-        ),
-        Condition::Or(a, b) => (
-            format!("{} or {}", render_child(a, 0), render_child(b, 0)),
-            0,
-        ),
     }
 }
 
-/// Render `condition`, wrapping it if its precedence is below `parent`.
-fn render_child(condition: &Condition, parent: u8) -> String {
-    let (text, precedence) = render(condition);
-    if precedence < parent {
-        format!("({text})")
-    } else {
-        text
+/// One side of an `AND`: an `OR` child needs parentheses.
+fn write_and_side(f: &mut fmt::Formatter<'_>, condition: &Condition) -> fmt::Result {
+    match condition {
+        Condition::Or(_, _) => write!(f, "({condition})"),
+        _ => write!(f, "{condition}"),
     }
 }
 

@@ -27,7 +27,7 @@ path = "src/bin/radb_opt.rs"
 # Module integration binary
 [[bin]]
 name = "radb"
-path = "src/bin/radb/main.rs"
+path = "src/bin/radb.rs"
 
 [profile.release]
 opt-level = 3

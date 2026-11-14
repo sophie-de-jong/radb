@@ -28,9 +28,9 @@ use std::process::ExitCode;
 use clap::{Parser as ClapParser, Subcommand};
 
 use radb::sql::tokenizer::tokenize;
-use radb::sql::{render_statement, render_syntax, statement_json};
+use radb::sql::{statement_json, statement_tree, syntax_tree};
 use radb::storage::Policy;
-use radb::{Compiler, Database, Statement};
+use radb::{Compiler, Database, IndentTree, Statement};
 
 /// A Project 2 SQL front end (parse, compile, check).
 #[derive(ClapParser)]
@@ -104,7 +104,7 @@ fn cli() -> Result<(), Box<dyn Error>> {
     match args.command {
         Command::Parse { query, explain } => {
             if explain {
-                print!("{}", render_syntax(&query)?);
+                print!("{}", IndentTree::new(&syntax_tree(&query)?));
             } else {
                 // The token stream is the scanner's output alone, so it is worth
                 // printing even for input that does not parse.
@@ -130,7 +130,7 @@ fn cli() -> Result<(), Box<dyn Error>> {
                 if json {
                     println!("{}", statement_json(statement));
                 } else {
-                    print!("{}", render_statement(statement));
+                    print!("{}", IndentTree::new(&statement_tree(statement)));
                 }
             }
             Ok(())

@@ -19,7 +19,7 @@ last binary wires all four together.
 - **Module 4 — optimizer** (`radb-opt`, `src/optimize/`): catalog statistics,
   selectivity and cost estimation, logical rewrites, dynamic-programming join
   ordering, and conversion to the physical plan Module 2 consumes.
-- **Integration** (`radb`, `src/bin/radb/`): a shell around `Database` with the
+- **Integration** (`radb`, `src/bin/radb.rs`): a shell around `Database` with the
   SQL subset plus `EXPLAIN`, `EXPLAIN ANALYZE`, `ANALYZE TABLE`, `SET frames`,
   and `LOAD TABLE ... FROM`. `Database` also owns the shared bulk loader.
 
@@ -145,5 +145,5 @@ modules. `docs/` holds the specification, design documents, reports and design
 log for each module. `docs/EXCEPTIONS.md` records every deliberate deviation
 from the specification so it stays visible.
 
-The integration binary lives in `src/bin/radb/`; the four module binaries are
+The integration binary lives in `src/bin/radb.rs`; the four module binaries are
 thin command-line layers (`src/bin/radb_*.rs`) over the library modules.

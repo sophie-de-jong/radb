@@ -25,6 +25,6 @@ pub mod tokenizer;
 pub use ast::{CompareOp, Condition, Operand};
 pub use compiler::{Compiler, Statement};
 pub use error::SqlError;
-pub use parser::render_syntax;
-pub use report::{render_statement, statement_json};
+pub use parser::{render_syntax, syntax_tree};
+pub use report::{render_statement, statement_json, statement_tree};
 pub use tokenizer::{Keyword, Position, Token, TokenKind, tokenize};

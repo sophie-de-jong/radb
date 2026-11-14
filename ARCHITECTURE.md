@@ -33,12 +33,12 @@ M3 (names and types) and M4 (row counts, histograms).
 | M2 execution | `src/exec/` | physical plan JSON in, rows and per-operator counters out |
 | M3 SQL front end | `src/sql/` | SQL text in, logical plan JSON out |
 | M4 optimizer | `src/optimize/` | logical plan JSON in, physical plan JSON out |
-| Integration | `src/database.rs`, `src/bin/radb/` | SQL text in, rows out; `Database` wires M3→M4→M2→M1 |
+| Integration | `src/database.rs`, `src/bin/radb.rs` | SQL text in, rows out; `Database` wires M3→M4→M2→M1 |
 | Bulk loader | `src/csv.rs` | typed rows from CSV; shared by M1's `load` and the shell |
 
 Each `src/bin/radb_*.rs` is only a command-line adapter: clap arguments,
 reading an input file, and printing a result the library produced. The shell's
-command parser is in `src/bin/radb/command.rs`, also an interface layer.
+command parser lives in `src/bin/radb.rs`, also an interface layer.
 
 ## Interfaces between modules
 

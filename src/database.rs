@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use crate::exec::Executor;
 use crate::exec::plan::Plan as PhysicalPlan;
-use crate::optimize::Optimizer;
 use crate::optimize::analyze::analyze_table;
+use crate::optimize::{ExplainNode, Optimizer};
 use crate::sql::compiler::{Compiler, Statement};
 use crate::storage::report::{PageLayout, ScanReport, SlotLayout};
 use crate::storage::{
@@ -20,17 +20,6 @@ use crate::storage::{
 };
 use crate::{Row, Schema};
 use crate::{Value, csv};
-
-/// The outcome of one statement in a SQL script.
-#[derive(Debug, Clone, PartialEq)]
-pub enum StatementOutcome {
-    /// A query that produced these rows, possibly none.
-    Rows(Vec<Row>),
-    /// A `CREATE TABLE`.
-    Created,
-    /// An `INSERT`.
-    Inserted,
-}
 
 /// A database: a buffer pool, its catalog, and the four modules wired together.
 pub struct Database {
@@ -113,54 +102,29 @@ impl Database {
 
     /// Run every statement in `sql`, returning the rows any queries produced.
     ///
-    /// This flattens a multi-statement script into one row list. Callers that
-    /// present a script should use [`Database::execute_sql_script`] to keep the
-    /// per-statement result boundaries.
-    pub fn execute_sql(&mut self, sql: &str) -> Result<Vec<Row>, Box<dyn Error>> {
-        let mut rows = Vec::new();
-        for outcome in self.execute_sql_script(sql)? {
-            if let StatementOutcome::Rows(statement_rows) = outcome {
-                rows.extend(statement_rows);
-            }
-        }
-        Ok(rows)
-    }
-
-    /// Run every statement in `sql`, returning one outcome per statement.
-    ///
     /// Statements are compiled and executed one at a time, so a later statement
-    /// sees a table an earlier one just created. Keeping the outcomes separate
-    /// lets the shell put a visible boundary between two result sets.
-    pub fn execute_sql_script(
-        &mut self,
-        sql: &str,
-    ) -> Result<Vec<StatementOutcome>, Box<dyn Error>> {
+    /// sees a table an earlier one just created. The shell splits a script on
+    /// semicolons and calls this once per statement.
+    pub fn execute_sql(&mut self, sql: &str) -> Result<Vec<Row>, Box<dyn Error>> {
         let mut compiler = Compiler::new(sql)?;
-        let mut outcomes = Vec::new();
+        let mut rows = Vec::new();
         while let Some(statement) = compiler.compile(&self.catalog)? {
-            let outcome = match statement {
+            match statement {
                 Statement::Select(plan) => {
                     let mut optimizer = Optimizer::new(plan, &self.catalog, self.frames);
                     optimizer.optimize()?;
                     let plan = optimizer.finish()?;
-                    let rows = self
+                    let new_rows = self
                         .executor(&plan)?
                         .by_ref()
                         .collect::<Result<Vec<_>, _>>()?;
-                    StatementOutcome::Rows(rows)
+                    rows.extend(new_rows);
                 }
-                Statement::Create { name, schema } => {
-                    self.create_table(&name, schema)?;
-                    StatementOutcome::Created
-                }
-                Statement::Insert { table_name, values } => {
-                    self.insert(&table_name, &values)?;
-                    StatementOutcome::Inserted
-                }
-            };
-            outcomes.push(outcome);
+                Statement::Create { name, schema } => self.create_table(&name, schema)?,
+                Statement::Insert { table_name, values } => self.insert(&table_name, &values)?,
+            }
         }
-        Ok(outcomes)
+        Ok(rows)
     }
 
     /// Create an empty table.
@@ -288,38 +252,21 @@ impl Database {
         Ok(stats)
     }
 
-    /// Explain `query`; when `analyze`, also run it and append its counters.
-    pub fn explain(&mut self, query: &str, analyze: bool) -> Result<String, Box<dyn Error>> {
+    /// Explain `query`; when `analyze`, also run it and attach its counters.
+    pub fn explain(&mut self, query: &str, analyze: bool) -> Result<ExplainNode, Box<dyn Error>> {
         let mut compiler = Compiler::new(query)?;
-        let mut out = String::new();
         let plan = compiler.compile_select(&self.catalog)?;
         let mut optimizer = Optimizer::new(plan, &self.catalog, self.frames);
         optimizer.optimize()?;
         let plan = optimizer.finish()?;
-        out.push_str("Query Plan:\n");
-        out.push_str(&crate::optimize::explain(
-            &plan,
-            &self.catalog,
-            self.frames,
-        )?);
+        let mut explain = crate::optimize::explain(&plan, &self.catalog, self.frames)?;
         if analyze {
             let mut exec = self.executor(&plan)?;
-            let rows = exec.by_ref().collect::<Result<Vec<_>, _>>()?;
-            out.push_str(&format!(
-                "\nExecuting with ANALYZE...\nReturned {} row(s)\n",
-                rows.len()
-            ));
-            for (depth, node) in exec.walk() {
-                out.push_str(&format!(
-                    "{}{} {}",
-                    "  ".repeat(depth),
-                    node,
-                    node.counters()
-                ));
-                out.push('\n');
-            }
+            let _rows = exec.by_ref().collect::<Result<Vec<_>, _>>()?;
+            let mut counters = exec.walk().map(|(_, node)| node.counters());
+            explain.attach_counters(&mut counters);
         }
-        Ok(out)
+        Ok(explain)
     }
 
     /// Build and open `plan` over this database, ready to pull rows.

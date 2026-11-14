@@ -25,6 +25,7 @@ use crate::Value;
 use crate::exec::Direction;
 use crate::exec::plan::Aggregate;
 use crate::schema::ColumnType;
+use crate::tree::{IndentTree, TreeLine};
 
 use super::ast::*;
 use super::error::SqlError;
@@ -648,16 +649,14 @@ impl<'a> Parser<'a> {
 // Parse-tree rendering
 // =====================================================================
 
-/// Render a whole program as indented syntax trees, separated by blank lines.
-pub(crate) fn render_program(statements: &[Statement]) -> String {
-    let mut out = String::new();
-    for (index, statement) in statements.iter().enumerate() {
-        if index > 0 {
-            out.push('\n');
-        }
-        out.push_str(&render_statement(statement));
+/// Build the indented syntax tree of a program.
+pub fn syntax_tree(input: &str) -> Result<TreeLine, SqlError> {
+    let statements = parse_program(input)?;
+    let mut root = TreeLine::new("program");
+    for statement in &statements {
+        root.push(render_statement(statement));
     }
-    out
+    Ok(root)
 }
 
 /// Parse and render a program's indented syntax tree.
@@ -665,52 +664,34 @@ pub(crate) fn render_program(statements: &[Statement]) -> String {
 /// This is the syntax-only entry point for the `parse` command; it needs no
 /// catalog and never exposes the AST.
 pub fn render_syntax(input: &str) -> Result<String, SqlError> {
-    Ok(render_program(&parse_program(input)?))
-}
-
-/// Append `text` as one line at `depth`.
-fn push_line(out: &mut String, depth: usize, text: &str) {
-    for _ in 0..depth {
-        out.push_str("  ");
-    }
-    out.push_str(text);
-    out.push('\n');
+    Ok(IndentTree::new(&syntax_tree(input)?).to_string())
 }
 
 /// The indented syntax tree of one statement.
-fn render_statement(statement: &Statement) -> String {
-    let mut out = String::new();
+fn render_statement(statement: &Statement) -> TreeLine {
     match statement {
         Statement::Create(create) => {
-            push_line(
-                &mut out,
-                0,
-                &format!("CREATE TABLE {}", create.name.as_str()),
-            );
+            let mut root = TreeLine::new(format!("CREATE TABLE {}", create.name.as_str()));
             for column in &create.columns {
-                push_line(
-                    &mut out,
-                    1,
-                    &format!("{} {}", column.name.as_str(), column.ty),
-                );
+                root.push(TreeLine::new(format!(
+                    "{} {}",
+                    column.name.as_str(),
+                    column.ty
+                )));
             }
+            root
         }
         Statement::Insert(insert) => {
-            push_line(
-                &mut out,
-                0,
-                &format!("INSERT INTO {}", insert.table.as_str()),
-            );
             let values: Vec<String> = insert
                 .values
                 .iter()
                 .map(|literal| render_literal(literal))
                 .collect();
-            push_line(&mut out, 1, &format!("VALUES ({})", values.join(", ")));
+            TreeLine::new(format!("INSERT INTO {}", insert.table.as_str()))
+                .with_child(TreeLine::new(format!("VALUES ({})", values.join(", "))))
         }
-        Statement::Query(query) => render_query(&mut out, 0, query),
+        Statement::Query(query) => render_query(query),
     }
-    out
 }
 
 /// One literal, as written.
@@ -722,26 +703,26 @@ fn render_literal(literal: &Value) -> String {
 }
 
 /// A query with its set operators.
-fn render_query(out: &mut String, depth: usize, query: &Query) {
-    push_line(out, depth, "QUERY");
-    render_block(out, depth + 1, &query.first);
+fn render_query(query: &Query) -> TreeLine {
+    let mut root = TreeLine::new("QUERY");
+    root.push(render_block(&query.first));
     for (op, block) in &query.rest {
-        push_line(out, depth + 1, setop_name(*op));
-        render_block(out, depth + 2, block);
+        root.push(TreeLine::new(setop_name(*op)).with_child(render_block(block)));
     }
+    root
 }
 
 /// One operand of a set operator.
-fn render_block(out: &mut String, depth: usize, block: &SelectBlock) {
+fn render_block(block: &SelectBlock) -> TreeLine {
     match block {
         SelectBlock::Select(select) => {
-            let mut head = String::from("SELECT");
-            if select.distinct {
-                head.push_str(" DISTINCT");
-            }
-            push_line(out, depth, &head);
+            let mut root = TreeLine::new(if select.distinct {
+                "SELECT DISTINCT".to_string()
+            } else {
+                "SELECT".to_string()
+            });
             match &select.items {
-                SelectItems::Star => push_line(out, depth + 1, "*"),
+                SelectItems::Star => root.push(TreeLine::new("*")),
                 SelectItems::List(items) => {
                     for item in items {
                         let mut text = match &item.expr {
@@ -751,23 +732,24 @@ fn render_block(out: &mut String, depth: usize, block: &SelectBlock) {
                         if let Some(alias) = &item.alias {
                             text.push_str(&format!(" AS {}", alias.as_str()));
                         }
-                        push_line(out, depth + 1, &text);
+                        root.push(TreeLine::new(text));
                     }
                 }
             }
-            push_line(out, depth, "FROM");
+            let mut from = TreeLine::new("FROM");
             for item in &select.from {
-                render_from(out, depth + 1, item);
+                from.push(render_from(item));
             }
+            root.push(from);
             if let Some(where_) = &select.where_ {
-                push_line(out, depth, &format!("WHERE {}", render_condition(where_)));
+                root.push(TreeLine::new(format!("WHERE {where_}")));
             }
             if !select.group_by.is_empty() {
                 let keys: Vec<String> = select.group_by.iter().map(|c| c.to_string()).collect();
-                push_line(out, depth, &format!("GROUP BY {}", keys.join(", ")));
+                root.push(TreeLine::new(format!("GROUP BY {}", keys.join(", "))));
             }
             if let Some(having) = &select.having {
-                push_line(out, depth, &format!("HAVING {}", render_condition(having)));
+                root.push(TreeLine::new(format!("HAVING {having}")));
             }
             if !select.order_by.is_empty() {
                 let keys: Vec<String> = select
@@ -775,43 +757,38 @@ fn render_block(out: &mut String, depth: usize, block: &SelectBlock) {
                     .iter()
                     .map(|item| format!("{} {}", item.key, direction_name(item.direction)))
                     .collect();
-                push_line(out, depth, &format!("ORDER BY {}", keys.join(", ")));
+                root.push(TreeLine::new(format!("ORDER BY {}", keys.join(", "))));
             }
             if let Some(limit) = select.limit {
-                push_line(out, depth, &format!("LIMIT {limit}"));
+                root.push(TreeLine::new(format!("LIMIT {limit}")));
             }
+            root
         }
-        SelectBlock::Sub(query) => {
-            push_line(out, depth, "SUBQUERY");
-            render_query(out, depth + 1, query);
-        }
+        SelectBlock::Sub(query) => TreeLine::new("SUBQUERY").with_child(render_query(query)),
     }
 }
 
 /// One `FROM` item and its join chain.
-fn render_from(out: &mut String, depth: usize, item: &FromItem) {
+fn render_from(item: &FromItem) -> TreeLine {
     match item {
-        FromItem::Table(table) => render_table_ref(out, depth, table),
-        FromItem::Join { left, right, on } => {
-            push_line(out, depth, &format!("JOIN ON {}", render_condition(on)));
-            render_from(out, depth + 1, left);
-            render_table_ref(out, depth + 1, right);
-        }
+        FromItem::Table(table) => render_table_ref(table),
+        FromItem::Join { left, right, on } => TreeLine::new(format!("JOIN ON {on}"))
+            .with_child(render_from(left))
+            .with_child(render_table_ref(right)),
     }
 }
 
 /// One table reference.
-fn render_table_ref(out: &mut String, depth: usize, table: &TableRef) {
+fn render_table_ref(table: &TableRef) -> TreeLine {
     match table {
         TableRef::Base { name, alias } => {
             let alias = alias
                 .as_ref()
                 .map_or(String::new(), |a| format!(" AS {}", a.as_str()));
-            push_line(out, depth, &format!("TABLE {}{alias}", name.as_str()));
+            TreeLine::new(format!("TABLE {}{alias}", name.as_str()))
         }
         TableRef::Subquery { query, alias } => {
-            push_line(out, depth, &format!("SUBQUERY AS {}", alias.as_str()));
-            render_query(out, depth + 1, query);
+            TreeLine::new(format!("SUBQUERY AS {}", alias.as_str())).with_child(render_query(query))
         }
     }
 }
@@ -825,48 +802,7 @@ fn render_aggregate(aggregate: &AggregateExpr) -> String {
     }
 }
 
-/// A condition, fully parenthesised.
-fn render_condition(condition: &Condition) -> String {
-    match condition {
-        Condition::Compare(compare) => format!(
-            "{} {} {}",
-            render_operand(&compare.left),
-            compare_name(compare.op),
-            render_operand(&compare.right)
-        ),
-        Condition::And(a, b) => {
-            format!("({} and {})", render_condition(a), render_condition(b))
-        }
-        Condition::Or(a, b) => {
-            format!("({} or {})", render_condition(a), render_condition(b))
-        }
-        Condition::Not(inner) => format!("(not {})", render_condition(inner)),
-    }
-}
-
-/// One operand of a condition.
-fn render_operand(operand: &Operand) -> String {
-    match operand {
-        Operand::Column(column) => column.to_string(),
-        Operand::Aggregate(aggregate) => render_aggregate(aggregate),
-        Operand::Literal(Value::Int(value)) => value.to_string(),
-        Operand::Literal(Value::Varchar(value)) => format!("'{}'", value.replace('\'', "''")),
-    }
-}
-
-/// The canonical spelling of a comparison operator.
-fn compare_name(op: CompareOp) -> &'static str {
-    match op {
-        CompareOp::Eq => "=",
-        CompareOp::Ne => "<>",
-        CompareOp::Lt => "<",
-        CompareOp::Le => "<=",
-        CompareOp::Gt => ">",
-        CompareOp::Ge => ">=",
-    }
-}
-
-/// The upper-case spelling of a set operator.
+/// The canonical spelling of a set operator.
 fn setop_name(op: SetOp) -> &'static str {
     match op {
         SetOp::Union => "UNION",

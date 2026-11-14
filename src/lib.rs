@@ -28,6 +28,7 @@
 #![allow(rustdoc::private_intra_doc_links)]
 
 pub mod schema;
+pub mod tree;
 pub mod value;
 
 pub mod csv;
@@ -37,10 +38,11 @@ pub mod optimize;
 pub mod sql;
 pub mod storage;
 
-pub use database::{Database, StatementOutcome};
+pub use database::Database;
 pub use exec::order::Direction;
 pub use exec::plan::{Mode, SortKey};
 pub use schema::{Column, ColumnType, Schema, SemanticError};
 pub use sql::tokenizer::{Keyword, Position, Scanner, Token, TokenKind, tokenize};
 pub use sql::{CompareOp, Compiler, Condition, Operand, SqlError, Statement, render_syntax};
+pub use tree::{DisplayTree, IndentTree, TreeLine};
 pub use value::{Row, Value};

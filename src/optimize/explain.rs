@@ -12,24 +12,74 @@
 //! join formula for a column equality).
 
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::Value;
+use crate::exec::Counters;
 use crate::exec::plan::{Aggregate, Mode, Plan};
 use crate::schema::{Column, ColumnType};
 use crate::sql::ast::{CompareOp, Condition, Operand};
 use crate::storage::stats::ColumnStats;
 use crate::storage::{Catalog, StorageError};
+use crate::tree::DisplayTree;
 
 use super::cost::CostModel;
 use super::dp::DpTable;
 use super::error::OptError;
 use super::selectivity::Selectivity;
 
-/// Render a physical plan as the indented `explain` tree of M4 §6.
-pub fn explain(plan: &Plan, catalog: &Catalog, frames: usize) -> Result<String, OptError> {
-    let mut out = String::new();
-    render(plan, catalog, frames, 0, &mut out)?;
-    Ok(out)
+/// One node of an `EXPLAIN` tree, with its estimate and optional measured
+/// counters after `EXPLAIN ANALYZE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplainNode {
+    /// The operator label, including its condition or keys.
+    pub label: String,
+    /// Estimated output rows.
+    pub est_rows: u64,
+    /// This node's own estimated page-I/O cost.
+    pub est_cost: u64,
+    /// Measured counters when the plan was also executed.
+    pub counters: Option<Counters>,
+    /// Child nodes, left before right.
+    pub children: Vec<ExplainNode>,
+}
+
+impl ExplainNode {
+    /// Attach measured counters in pre-order, the order the executor walk uses.
+    pub fn attach_counters(&mut self, counters: &mut impl Iterator<Item = Counters>) {
+        self.counters = counters.next();
+        for child in &mut self.children {
+            child.attach_counters(counters);
+        }
+    }
+}
+
+impl fmt::Display for ExplainNode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{:<42} est_rows={}  est_cost={}",
+            self.label, self.est_rows, self.est_cost
+        )?;
+        if let Some(counters) = self.counters {
+            write!(f, "  {counters}")?;
+        }
+        Ok(())
+    }
+}
+
+impl DisplayTree for ExplainNode {
+    fn children(&self) -> Vec<&dyn DisplayTree> {
+        self.children
+            .iter()
+            .map(|child| child as &dyn DisplayTree)
+            .collect()
+    }
+}
+
+/// Build the `explain` tree of M4 §6 for a physical plan.
+pub fn explain(plan: &Plan, catalog: &Catalog, frames: usize) -> Result<ExplainNode, OptError> {
+    build(plan, catalog, frames)
 }
 
 /// Render the DP tables of one optimized plan, one row per subset.
@@ -113,25 +163,20 @@ impl StatsContext {
     }
 }
 
-/// Estimate and render `plan` and its children at `depth`.
-fn render(
-    plan: &Plan,
-    catalog: &Catalog,
-    frames: usize,
-    depth: usize,
-    out: &mut String,
-) -> Result<(), OptError> {
+/// Estimate one node and build its subtree.
+fn build(plan: &Plan, catalog: &Catalog, frames: usize) -> Result<ExplainNode, OptError> {
     let estimated = estimate(plan, catalog, frames)?;
-    let indent = "  ".repeat(depth);
-    let line = format!("{indent}{}", label(plan));
-    out.push_str(&format!(
-        "{line:<42} est_rows={}  est_cost={}\n",
-        estimated.rows, estimated.cost
-    ));
+    let mut node = ExplainNode {
+        label: label(plan),
+        est_rows: estimated.rows,
+        est_cost: estimated.cost,
+        counters: None,
+        children: Vec::new(),
+    };
     for child in children(plan) {
-        render(child, catalog, frames, depth + 1, out)?;
+        node.children.push(build(child, catalog, frames)?);
     }
-    Ok(())
+    Ok(node)
 }
 
 /// The one-line label of a node, in the style of M4 §6.

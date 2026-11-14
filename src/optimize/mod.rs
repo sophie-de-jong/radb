@@ -14,6 +14,6 @@ pub mod optimizer;
 pub mod rules;
 pub mod selectivity;
 
-pub use explain::{explain, render_dp_tables};
+pub use explain::{ExplainNode, explain, render_dp_tables};
 pub use optimizer::{DEFAULT_PASSES, Optimizer};
 pub use rules::RewriteRule;

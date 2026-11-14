@@ -17,6 +17,7 @@
 //! and compared structurally.
 
 use std::collections::HashSet;
+use std::fmt;
 
 use serde::de::Error as _;
 use serde::ser::SerializeSeq;
@@ -25,6 +26,7 @@ use serde::{Deserialize, Deserializer, Serializer};
 use super::ast::Condition;
 use crate::exec::Direction;
 use crate::exec::plan::Aggregate;
+use crate::tree::DisplayTree;
 
 /// A logical plan tree.
 #[derive(Debug, Clone, PartialEq, Deserialize, serde::Serialize)]
@@ -132,6 +134,88 @@ pub enum Plan {
         /// The right input.
         right: Box<Plan>,
     },
+}
+
+impl fmt::Display for Plan {
+    /// The one-line label of this logical operator.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Plan::Scan { table } => write!(f, "scan {table}"),
+            Plan::Select { condition, .. } => write!(f, "select \"{condition}\""),
+            Plan::Project { columns, .. } => {
+                let columns: Vec<String> = columns
+                    .iter()
+                    .map(|(input, output)| {
+                        if input == output {
+                            input.clone()
+                        } else {
+                            format!("{input} as {output}")
+                        }
+                    })
+                    .collect();
+                write!(f, "project [{}]", columns.join(", "))
+            }
+            Plan::Join { condition, .. } => write!(f, "join \"{condition}\""),
+            Plan::Cross { .. } => f.write_str("cross"),
+            Plan::Rename { to, .. } => write!(f, "rename {to}"),
+            Plan::GroupBy {
+                keys, aggregates, ..
+            } => {
+                let aggregates: Vec<String> = aggregates
+                    .iter()
+                    .map(|spec| format!("[{},{},{}]", spec.0, spec.1, spec.2))
+                    .collect();
+                write!(
+                    f,
+                    "group_by keys [{}] aggregates [{}]",
+                    keys.join(", "),
+                    aggregates.join(", ")
+                )
+            }
+            Plan::Distinct { .. } => f.write_str("distinct"),
+            Plan::Sort { keys, .. } => {
+                let keys: Vec<String> = keys
+                    .iter()
+                    .map(|(name, direction)| format!("[{name},{}]", direction_name(*direction)))
+                    .collect();
+                write!(f, "sort [{}]", keys.join(", "))
+            }
+            Plan::Limit { n, .. } => write!(f, "limit {n}"),
+            Plan::UnionAll { .. } => f.write_str("union_all"),
+            Plan::Union { .. } => f.write_str("union"),
+            Plan::Intersect { .. } => f.write_str("intersect"),
+            Plan::Except { .. } => f.write_str("except"),
+        }
+    }
+}
+
+impl DisplayTree for Plan {
+    fn children(&self) -> Vec<&dyn DisplayTree> {
+        match self {
+            Plan::Scan { .. } => Vec::new(),
+            Plan::Select { child, .. }
+            | Plan::Project { child, .. }
+            | Plan::Rename { child, .. }
+            | Plan::GroupBy { child, .. }
+            | Plan::Distinct { child }
+            | Plan::Sort { child, .. }
+            | Plan::Limit { child, .. } => vec![child.as_ref()],
+            Plan::Join { left, right, .. }
+            | Plan::Cross { left, right }
+            | Plan::UnionAll { left, right }
+            | Plan::Union { left, right }
+            | Plan::Intersect { left, right }
+            | Plan::Except { left, right } => vec![left.as_ref(), right.as_ref()],
+        }
+    }
+}
+
+/// The plan's spelling of a sort direction.
+fn direction_name(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Asc => "asc",
+        Direction::Desc => "desc",
+    }
 }
 
 impl Plan {

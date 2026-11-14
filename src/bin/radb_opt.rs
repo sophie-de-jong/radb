@@ -8,11 +8,12 @@ use std::process::ExitCode;
 
 use clap::{Parser as ClapParser, Subcommand};
 
-use radb::Database;
 use radb::optimize::rules::default_rules;
 use radb::optimize::{DEFAULT_PASSES, Optimizer, explain, render_dp_tables};
 use radb::sql::plan::Plan as LogicalPlan;
 use radb::storage::Policy;
+use radb::storage::stats::stats_tree;
+use radb::{Database, IndentTree};
 
 #[derive(ClapParser)]
 #[command(
@@ -99,8 +100,10 @@ fn cli() -> Result<(), Box<dyn Error>> {
             frames,
         } => {
             let mut db = Database::open_with(db, frames.get(), Policy::Lru)?;
-            db.analyze(&table, buckets)?;
-            println!("analyzed table {table}");
+            let stats = db.analyze(&table, buckets)?;
+            let meta = db.catalog().require(&table)?;
+            let tree = stats_tree(&table, &meta.schema, &stats);
+            print!("{}", IndentTree::new(&tree));
             Ok(())
         }
         Command::Plan {
@@ -152,7 +155,8 @@ fn cli() -> Result<(), Box<dyn Error>> {
             optimizer.set_passes(passes);
             optimizer.optimize()?;
             let plan = optimizer.finish()?;
-            print!("{}", explain(&plan, db.catalog(), frames.get())?);
+            let tree = explain(&plan, db.catalog(), frames.get())?;
+            print!("{}", IndentTree::new(&tree));
             Ok(())
         }
         Command::DpTable {

@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::sql::ast::Condition;
 use crate::storage::{BufferPool, Catalog};
+use crate::tree::DisplayTree;
 
 use super::error::ExecError;
 use super::executor::{Context, Executor};
@@ -278,105 +279,64 @@ pub enum Plan {
 }
 
 impl fmt::Display for Plan {
-    /// The indented tree an `EXPLAIN` prints, one operator per line.
+    /// The one-line label of this physical operator.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.write_tree(f, 0)
-    }
-}
-
-impl Plan {
-    /// Write this node's line and its children's, indented by `depth`.
-    fn write_tree(&self, f: &mut fmt::Formatter<'_>, depth: usize) -> fmt::Result {
-        write!(f, "{}", "  ".repeat(depth))?;
         match self {
             Plan::SeqScan { table, alias } => match alias {
-                Some(alias) => writeln!(f, "seqscan {table} as {alias}"),
-                None => writeln!(f, "seqscan {table}"),
+                Some(alias) => write!(f, "seqscan {table} as {alias}"),
+                None => write!(f, "seqscan {table}"),
             },
-            Plan::Filter { condition, child } => {
-                writeln!(f, "filter {condition}")?;
-                child.write_tree(f, depth + 1)
-            }
-            Plan::Project { columns, child } => {
-                writeln!(f, "project [{}]", columns.join(", "))?;
-                child.write_tree(f, depth + 1)
-            }
-            Plan::Sort { keys, child } => {
+            Plan::Filter { condition, .. } => write!(f, "filter {condition}"),
+            Plan::Project { columns, .. } => write!(f, "project [{}]", columns.join(", ")),
+            Plan::Sort { keys, .. } => {
                 let keys: Vec<String> = keys
                     .iter()
                     .map(|key| format!("{}:{:?}", key.column(), key.direction()))
                     .collect();
-                writeln!(f, "sort [{}]", keys.join(", "))?;
-                child.write_tree(f, depth + 1)
+                write!(f, "sort [{}]", keys.join(", "))
             }
             Plan::GroupBy {
                 mode,
                 keys,
                 aggregates,
-                child,
-            } => {
-                writeln!(
-                    f,
-                    "group_by {mode:?} [{}] [{aggregates:?}]",
-                    keys.join(", ")
-                )?;
-                child.write_tree(f, depth + 1)
+                ..
+            } => write!(
+                f,
+                "group_by {mode:?} [{}] [{aggregates:?}]",
+                keys.join(", ")
+            ),
+            Plan::Distinct { mode, .. } => write!(f, "distinct {mode:?}"),
+            Plan::Limit { n, .. } => write!(f, "limit {n}"),
+            Plan::HashJoin { condition, .. } => write!(f, "hash_join {condition}"),
+            Plan::NestedLoopJoin { condition, .. } => {
+                write!(f, "nested_loop_join {condition}")
             }
-            Plan::Distinct { mode, child } => {
-                writeln!(f, "distinct {mode:?}")?;
-                child.write_tree(f, depth + 1)
-            }
-            Plan::Limit { n, child } => {
-                writeln!(f, "limit {n}")?;
-                child.write_tree(f, depth + 1)
-            }
-            Plan::HashJoin {
-                condition,
-                left,
-                right,
-            } => {
-                writeln!(f, "hash_join {condition}")?;
-                left.write_tree(f, depth + 1)?;
-                right.write_tree(f, depth + 1)
-            }
-            Plan::NestedLoopJoin {
-                condition,
-                left,
-                right,
-            } => {
-                writeln!(f, "nested_loop_join {condition}")?;
-                left.write_tree(f, depth + 1)?;
-                right.write_tree(f, depth + 1)
-            }
-            Plan::SortMergeJoin {
-                condition,
-                left,
-                right,
-            } => {
-                writeln!(f, "sort_merge_join {condition}")?;
-                left.write_tree(f, depth + 1)?;
-                right.write_tree(f, depth + 1)
-            }
-            Plan::UnionAll { left, right } => {
-                writeln!(f, "union_all")?;
-                left.write_tree(f, depth + 1)?;
-                right.write_tree(f, depth + 1)
-            }
-            Plan::Union { left, right } => {
-                writeln!(f, "union")?;
-                left.write_tree(f, depth + 1)?;
-                right.write_tree(f, depth + 1)
-            }
-            Plan::Intersect { left, right } => {
-                writeln!(f, "intersect")?;
-                left.write_tree(f, depth + 1)?;
-                right.write_tree(f, depth + 1)
-            }
-            Plan::Except { left, right } => {
-                writeln!(f, "except")?;
-                left.write_tree(f, depth + 1)?;
-                right.write_tree(f, depth + 1)
-            }
+            Plan::SortMergeJoin { condition, .. } => write!(f, "sort_merge_join {condition}"),
+            Plan::UnionAll { .. } => f.write_str("union_all"),
+            Plan::Union { .. } => f.write_str("union"),
+            Plan::Intersect { .. } => f.write_str("intersect"),
+            Plan::Except { .. } => f.write_str("except"),
+        }
+    }
+}
+
+impl DisplayTree for Plan {
+    fn children(&self) -> Vec<&dyn DisplayTree> {
+        match self {
+            Plan::SeqScan { .. } => Vec::new(),
+            Plan::Filter { child, .. }
+            | Plan::Project { child, .. }
+            | Plan::Sort { child, .. }
+            | Plan::GroupBy { child, .. }
+            | Plan::Distinct { child, .. }
+            | Plan::Limit { child, .. } => vec![child.as_ref()],
+            Plan::HashJoin { left, right, .. }
+            | Plan::NestedLoopJoin { left, right, .. }
+            | Plan::SortMergeJoin { left, right, .. }
+            | Plan::UnionAll { left, right }
+            | Plan::Union { left, right }
+            | Plan::Intersect { left, right }
+            | Plan::Except { left, right } => vec![left.as_ref(), right.as_ref()],
         }
     }
 }

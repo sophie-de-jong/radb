@@ -20,8 +20,10 @@ use std::process::ExitCode;
 use clap::{Parser as ClapParser, Subcommand};
 
 use radb::Database;
+use radb::IndentTree;
 use radb::exec::{Counters, Plan};
 use radb::storage::Policy;
+use radb::tree::tree_from_flat;
 
 /// A Project 2 execution engine (iterators, sorting, joins, one memory budget).
 #[derive(ClapParser)]
@@ -138,9 +140,12 @@ fn cli() -> Result<(), Box<dyn Error>> {
                 row?;
             }
 
-            for (depth, node) in exec.walk() {
-                let indent = "  ".repeat(depth);
-                println!("{indent}{node}\t{}", node.counters())
+            let lines = exec
+                .walk()
+                .map(|(depth, node)| (depth, format!("{node}\t{}", node.counters())))
+                .collect();
+            if let Some(tree) = tree_from_flat(lines) {
+                print!("{}", IndentTree::new(&tree));
             }
             Ok(())
         }

@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use radb::{Compiler, Database, Row, Statement, StatementOutcome, Value};
+use radb::{Compiler, Database, Row, Statement, Value};
 
 fn temp_dir(name: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
@@ -67,16 +67,13 @@ fn scripts_see_earlier_create_statements() {
     assert!(matches!(statements[1], Statement::Insert { .. }));
     assert!(matches!(statements[3], Statement::Select(_)));
 
-    let outcomes = db.execute_sql_script(script).unwrap();
-    assert_eq!(outcomes.len(), 4);
-    assert_eq!(outcomes[0], StatementOutcome::Created);
-    assert_eq!(outcomes[1], StatementOutcome::Inserted);
+    let rows = db.execute_sql(script).unwrap();
     assert_eq!(
-        outcomes[3],
-        StatementOutcome::Rows(vec![
+        rows,
+        vec![
             Row::from(vec![Value::Int(1)]),
             Row::from(vec![Value::Int(2)]),
-        ])
+        ]
     );
 
     let _ = fs::remove_dir_all(&dir);
