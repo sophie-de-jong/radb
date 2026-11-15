@@ -53,7 +53,7 @@ enum Command {
         #[arg(long)]
         no_optimize: bool,
         /// Disable one numbered rewrite rule (repeatable, for measurements).
-        #[arg(long = "without-rule")]
+        #[arg(long)]
         without_rule: Vec<usize>,
     },
     Explain {
@@ -100,9 +100,9 @@ fn cli() -> Result<(), Box<dyn Error>> {
             frames,
         } => {
             let mut db = Database::open_with(db, frames.get(), Policy::Lru)?;
-            let stats = db.analyze(&table, buckets)?;
+            db.analyze(&table, buckets)?;
             let meta = db.catalog().require(&table)?;
-            let tree = stats_tree(&table, &meta.schema, &stats);
+            let tree = stats_tree(&table, &meta.schema, meta.stats.as_ref().expect("we just analyzed"));
             print!("{}", IndentTree::new(&tree));
             Ok(())
         }

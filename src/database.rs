@@ -15,7 +15,7 @@ use crate::optimize::{ExplainNode, Optimizer};
 use crate::sql::compiler::{Compiler, Statement};
 use crate::storage::report::{PageLayout, ScanReport, SlotLayout};
 use crate::storage::{
-    BufferPool, Catalog, HeapFile, PageId, Policy, Stats, StorageError, TableMeta, slotted,
+    BufferPool, Catalog, HeapFile, PageId, Policy, StorageError, TableMeta, slotted,
     validate_table_name,
 };
 use crate::{Row, Schema};
@@ -244,12 +244,12 @@ impl Database {
     }
 
     /// Compute and store `table`'s statistics with `buckets` histogram buckets.
-    pub fn analyze(&mut self, table: &str, buckets: usize) -> Result<Stats, Box<dyn Error>> {
+    pub fn analyze(&mut self, table: &str, buckets: usize) -> Result<(), Box<dyn Error>> {
         let meta = self.catalog.require_mut(table)?;
         let stats = analyze_table(&mut self.pool, &self.path, meta, buckets)?;
-        meta.stats = Some(stats.clone());
+        meta.stats = Some(stats);
         self.save()?;
-        Ok(stats)
+        Ok(())
     }
 
     /// Explain `query`; when `analyze`, also run it and attach its counters.

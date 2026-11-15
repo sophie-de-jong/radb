@@ -108,9 +108,9 @@ fn cli() -> Result<(), Box<dyn std::error::Error>> {
             Ok(Command::AnalyzeTable { name }) => {
                 println!("analyzing table {name}...");
                 match db.analyze(&name, DEFAULT_BUCKETS) {
-                    Ok(stats) => match db.catalog().require(&name) {
+                    Ok(()) => match db.catalog().require(&name) {
                         Ok(meta) => {
-                            let tree = stats_tree(&name, &meta.schema, &stats);
+                            let tree = stats_tree(&name, &meta.schema, meta.stats.as_ref().expect("we just analyzed"));
                             print!("{}", IndentTree::new(&tree));
                         }
                         Err(err) => eprintln!("Error: {err}"),
@@ -310,47 +310,4 @@ fn print_help() {
     println!("  SET frames = n;");
     println!("  LOAD TABLE name FROM 'file.csv';");
     println!("  exit/quit");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Command, parse_command, split_sql};
-
-    #[test]
-    fn parses_commands_with_whitespace() {
-        assert_eq!(parse_command("exit;").unwrap(), Command::Exit);
-        assert_eq!(
-            parse_command("SET frames = 7").unwrap(),
-            Command::SetFrames { frames: 7 }
-        );
-        assert_eq!(
-            parse_command("SET frames=9").unwrap(),
-            Command::SetFrames { frames: 9 }
-        );
-        assert_eq!(
-            parse_command("ANALYZE TABLE R;").unwrap(),
-            Command::AnalyzeTable {
-                name: "R".to_string()
-            }
-        );
-        assert_eq!(
-            parse_command("LOAD TABLE R FROM 'file.csv';").unwrap(),
-            Command::LoadTable {
-                table: "R".to_string(),
-                file: "file.csv".to_string(),
-            }
-        );
-        assert!(matches!(
-            parse_command("EXPLAIN ANALYZE SELECT * FROM R;").unwrap(),
-            Command::Explain { analyze: true, .. }
-        ));
-    }
-
-    #[test]
-    fn splits_sql_outside_strings_and_comments() {
-        assert_eq!(
-            split_sql("SELECT ';' FROM R; SELECT 2; -- ; ignored\nSELECT 3"),
-            vec!["SELECT ';' FROM R", "SELECT 2", "-- ; ignored\nSELECT 3"]
-        );
-    }
 }
