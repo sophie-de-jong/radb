@@ -1,5 +1,7 @@
 # radb
 
+VIDEO WALKTHROUGH: https://youtu.be/lWvxSbiAd0c
+
 A database system in Rust, built one module at a time (Project 2). Each module
 is defined by its own contract and runs through its own command-line tool; the
 last binary wires all four together.
